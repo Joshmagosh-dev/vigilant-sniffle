@@ -438,6 +438,7 @@ export function bootstrapGameState(): void {
 
     selectedSystemId: 'SOL',
     selectedFleetId: 'MINER-1',
+    selectedSystemObject: null,
 
     resources: {
       tieredMetals: ensureTieredMetals(),
@@ -1345,4 +1346,91 @@ export function reinforcePlanet(systemId: string, planetId: string, fleetId: str
 export function getPlanetController(systemId: string, planetId: string): PlanetController | null {
   const system = state.galaxy[systemId];
   return system?.planets?.[planetId]?.controller ?? null;
+}
+
+// -----------------------------------------------------------------------------
+// Action wrappers that use selection
+// -----------------------------------------------------------------------------
+
+export function mineSelectedObject(): boolean {
+  const selection = state.selectedSystemObject;
+  if (!selection) {
+    pushIntel('ALERT', 'MINING FAILED: No object selected.');
+    return false;
+  }
+
+  // Parse object ID to extract type and actual ID
+  const parts = selection.objectId.split(':');
+  const objectType = parts[1];
+  const actualObjectId = parts[2];
+
+  if (objectType !== 'asteroid') {
+    pushIntel('ALERT', 'MINING FAILED: Selected object is not an asteroid.');
+    return false;
+  }
+
+  return mineAsteroid(selection.systemId, actualObjectId);
+}
+
+export function invadeSelectedObject(): boolean {
+  const selection = state.selectedSystemObject;
+  if (!selection) {
+    pushIntel('ALERT', 'INVASION FAILED: No object selected.');
+    return false;
+  }
+
+  // Parse object ID to extract type and actual ID
+  const parts = selection.objectId.split(':');
+  const objectType = parts[1];
+  const actualObjectId = parts[2];
+
+  if (objectType !== 'planet') {
+    pushIntel('ALERT', 'INVASION FAILED: Selected object is not a planet.');
+    return false;
+  }
+
+  // Find player combat fleet in system
+  const playerCombatFleet = Object.values(state.fleets).find(f => 
+    f.owner === 'PLAYER' && 
+    f.role === 'COMBAT' && 
+    f.location === selection.systemId
+  );
+
+  if (!playerCombatFleet) {
+    pushIntel('ALERT', 'INVASION FAILED: No combat fleet in system.');
+    return false;
+  }
+
+  return invadePlanet(selection.systemId, actualObjectId, playerCombatFleet.id);
+}
+
+export function reinforceSelectedObject(): boolean {
+  const selection = state.selectedSystemObject;
+  if (!selection) {
+    pushIntel('ALERT', 'REINFORCEMENT FAILED: No object selected.');
+    return false;
+  }
+
+  // Parse object ID to extract type and actual ID
+  const parts = selection.objectId.split(':');
+  const objectType = parts[1];
+  const actualObjectId = parts[2];
+
+  if (objectType !== 'planet') {
+    pushIntel('ALERT', 'REINFORCEMENT FAILED: Selected object is not a planet.');
+    return false;
+  }
+
+  // Find player fleet in system
+  const playerFleet = Object.values(state.fleets).find(f => 
+    f.owner === 'PLAYER' && 
+    f.location === selection.systemId
+  );
+
+  if (!playerFleet) {
+    pushIntel('ALERT', 'REINFORCEMENT FAILED: No fleet in system.');
+    return false;
+  }
+
+  return reinforcePlanet(selection.systemId, actualObjectId, playerFleet.id);
 }

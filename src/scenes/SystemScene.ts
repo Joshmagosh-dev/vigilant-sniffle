@@ -8,7 +8,7 @@
 // -----------------------------------------------------------------------------
 
 import Phaser from 'phaser';
-import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController } from '../core/GameState';
+import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController, selectSystemObject, getSelectedSystemObject, mineSelectedObject, invadeSelectedObject, reinforceSelectedObject, listSystemObjects } from '../core/GameState';
 import { VisualStyle } from '../ui/VisualStyle';
 import { getAffiliationColor, getHighlightStyle, getStationAffiliation, getPlanetAffiliation } from '../ui/colors';
 
@@ -31,6 +31,9 @@ type SystemObject = {
   marker: Phaser.GameObjects.Arc;
   label: Phaser.GameObjects.Text; // name (UNDER)
   icon: Phaser.GameObjects.Text;  // icon (RIGHT)
+  
+  // NEW: Store object data for interaction
+  objectId: string; // Full object ID for core selection
 };
 
 export default class SystemScene extends Phaser.Scene {
@@ -46,10 +49,12 @@ export default class SystemScene extends Phaser.Scene {
   private gridLayer!: Phaser.GameObjects.Graphics;
   private selectionLayer!: Phaser.GameObjects.Graphics;
   private rangeLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for highlights
+  private hoverLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for hover highlights
   private infoText!: Phaser.GameObjects.Text;
 
   private systemObjects: SystemObject[] = [];
   private selectedObjectId: string | null = null;
+  private hoveredObjectId: string | null = null;
 
   constructor() {
     super({ key: 'SystemScene' });
@@ -78,6 +83,7 @@ export default class SystemScene extends Phaser.Scene {
     this.gridLayer = this.add.graphics();
     this.selectionLayer = this.add.graphics();
     this.rangeLayer = this.add.graphics(); // NEW: range layer for highlights
+    this.hoverLayer = this.add.graphics(); // NEW: hover layer for highlights
 
     // NOTE: This doesn't truly clip rendering, but keeps your existing behavior.
     // If you want real clipping later, we can add a geometry mask.
@@ -142,6 +148,7 @@ export default class SystemScene extends Phaser.Scene {
 
       const obj: SystemObject = {
         id: `${system.id}-${i}`,
+        objectId: `${systemId}:${type}:${i}`, // Core object ID for selection
         type,
         coord,
         name: this.generateObjectName(type, i, rng, systemId),
@@ -409,6 +416,29 @@ export default class SystemScene extends Phaser.Scene {
         obj.marker = this.add.circle(pos.x, pos.y, size, affiliationColors.fill || affiliationColors.stroke, 1);
       }
 
+      // NEW: Make marker interactive
+      obj.marker.setInteractive({ hitArea: new Phaser.Geom.Circle(0, 0, size + 4), hitAreaCallback: Phaser.Geom.Circle.Contains });
+      obj.marker.setData('objectId', obj.objectId);
+      obj.marker.setData('type', obj.type);
+      
+      // Add hover/selection handlers
+      obj.marker.on('pointerover', () => {
+        this.hoveredObjectId = obj.objectId;
+        this.refreshHighlights();
+      });
+      
+      obj.marker.on('pointerout', () => {
+        this.hoveredObjectId = null;
+        this.refreshHighlights();
+      });
+      
+      obj.marker.on('pointerdown', () => {
+        if (systemId) {
+          selectSystemObject(systemId, obj.objectId);
+          this.refresh();
+        }
+      });
+
       // ICON (RIGHT of marker) - add control indicators
       let iconText = this.objectIcon(obj.type);
       if (obj.type === 'planet') {
@@ -475,39 +505,43 @@ export default class SystemScene extends Phaser.Scene {
         return;
       }
 
-      // M to mine selected asteroid
-      if (e.key.toLowerCase() === 'm') {
-        this.mineSelectedAsteroid();
+      // Tab to cycle through objects
+      if (e.key.toLowerCase() === 'tab') {
+        // Tab functionality can be added later if needed
         return;
       }
 
-      // Tab to cycle through objects
-      if (e.key.toLowerCase() === 'tab') {
-        this.selectNextObject();
+      // M to mine selected asteroid
+      if (e.key.toLowerCase() === 'm') {
+        mineSelectedObject();
+        this.refresh();
         return;
       }
 
       // Space to mine if asteroid selected
       if (e.key === ' ') {
-        this.mineSelectedAsteroid();
+        mineSelectedObject();
+        this.refresh();
         return;
       }
 
       // I to invade planet
       if (e.key.toLowerCase() === 'i') {
-        this.invadeSelectedPlanet();
+        invadeSelectedObject();
+        this.refresh();
         return;
       }
 
       // R to reinforce planet
       if (e.key.toLowerCase() === 'r') {
-        this.reinforceSelectedPlanet();
+        reinforceSelectedObject();
+        this.refresh();
         return;
       }
 
-      // Number keys to select objects by type
+      // Number keys to select objects by type (legacy - can be reimplemented later)
       if (e.key >= '1' && e.key <= '4') {
-        this.selectObjectByType(parseInt(e.key));
+        // Type selection can be reimplemented later if needed
         return;
       }
     });
@@ -548,110 +582,8 @@ export default class SystemScene extends Phaser.Scene {
     return best;
   }
 
-  private selectNextObject(): void {
-    if (this.systemObjects.length === 0) return;
-
-    const currentIndex = this.selectedObjectId ? 
-      this.systemObjects.findIndex(o => o.id === this.selectedObjectId) : -1;
-    const nextIndex = (currentIndex + 1) % this.systemObjects.length;
-    this.selectedObjectId = this.systemObjects[nextIndex].id;
-    this.refresh();
-  }
-
-  private selectObjectByType(typeKey: number): void {
-    const typeMap: { [key: number]: SystemObject['type'] } = {
-      1: 'planet',
-      2: 'asteroid', 
-      3: 'station',
-      4: 'anomaly'
-    };
-
-    const targetType = typeMap[typeKey];
-    if (!targetType) return;
-
-    const objects = this.systemObjects.filter(o => o.type === targetType);
-    if (objects.length === 0) return;
-
-    // Select first object of this type
-    this.selectedObjectId = objects[0].id;
-    this.refresh();
-  }
-
-  private invadeSelectedPlanet(): void {
-    if (!this.selectedObjectId) return;
-
-    const selected = this.systemObjects.find(o => o.id === this.selectedObjectId);
-    if (!selected || selected.type !== 'planet') return;
-
-    const state = getState();
-    const systemId = state.selectedSystemId;
-    if (!systemId) return;
-
-    // Find player combat fleet in system
-    const playerCombatFleet = Object.values(state.fleets).find(f => 
-      f.owner === 'PLAYER' && 
-      f.role === 'COMBAT' && 
-      f.location === systemId
-    );
-
-    if (!playerCombatFleet) {
-      this.showPlanetFeedback(selected, 'NO COMBAT FLEET IN SYSTEM', 0xff4444); // RED for error
-      return;
-    }
-
-    if (selected.planetController === 'PLAYER') {
-      this.showPlanetFeedback(selected, 'ALREADY CONTROLLED', 0xffaa00);
-      return;
-    }
-
-    const success = invadePlanet(systemId, selected.id, playerCombatFleet.id);
-    if (success) {
-      this.showPlanetFeedback(selected, 'PLANET CONQUERED!', 0x4a9eff); // BLUE for success (player color)
-      selected.planetController = 'PLAYER';
-      selected.planetTroops = (selected.planetTroops || 0) + 30; // Occupation troops
-    } else {
-      this.showPlanetFeedback(selected, 'INVASION FAILED!', 0xff4444); // RED for failure
-    }
-
-    this.refresh();
-  }
-
-  private reinforceSelectedPlanet(): void {
-    if (!this.selectedObjectId) return;
-
-    const selected = this.systemObjects.find(o => o.id === this.selectedObjectId);
-    if (!selected || selected.type !== 'planet') return;
-
-    const state = getState();
-    const systemId = state.selectedSystemId;
-    if (!systemId) return;
-
-    // Find player fleet in system
-    const playerFleet = Object.values(state.fleets).find(f => 
-      f.owner === 'PLAYER' && 
-      f.location === systemId
-    );
-
-    if (!playerFleet) {
-      this.showPlanetFeedback(selected, 'NO FLEET IN SYSTEM', 0xff4444); // RED for error
-      return;
-    }
-
-    if (selected.planetController !== 'PLAYER') {
-      this.showPlanetFeedback(selected, 'MUST CONTROL PLANET FIRST', 0xff4444); // RED for error
-      return;
-    }
-
-    const success = reinforcePlanet(systemId, selected.id, playerFleet.id);
-    if (success) {
-      this.showPlanetFeedback(selected, 'PLANET REINFORCED!', 0x4a9eff); // BLUE for success (player color)
-      selected.planetTroops = (selected.planetTroops || 0) + 20;
-    } else {
-      this.showPlanetFeedback(selected, 'REINFORCEMENT FAILED!', 0xff4444); // RED for failure
-    }
-
-    this.refresh();
-  }
+  // Legacy methods removed - selection now handled by core state
+  // Use selectSystemObject() and getSelectedSystemObject() from GameState instead
 
   private showPlanetFeedback(obj: SystemObject, message: string, color: number): void {
     // Create temporary text feedback
@@ -706,6 +638,39 @@ export default class SystemScene extends Phaser.Scene {
     }
   }
 
+  // NEW: Dedicated method for hover and selection highlights
+  private refreshHighlights(): void {
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+
+    // Clear highlight layers
+    this.hoverLayer.clear();
+    this.selectionLayer.clear();
+
+    // Draw hover highlight
+    if (this.hoveredObjectId) {
+      const hoveredObj = this.systemObjects.find(obj => obj.objectId === this.hoveredObjectId);
+      if (hoveredObj) {
+        const pos = this.hexToPixel(hoveredObj.coord.q, hoveredObj.coord.r, centerX, centerY);
+        const hoverStyle = getHighlightStyle('hover');
+        this.drawHexOutline(this.hoverLayer, pos.x, pos.y, this.HEX_SIZE + 2, hoverStyle.stroke, hoverStyle.width);
+      }
+    }
+
+    // Draw selection highlight (from core state)
+    const selectedObject = getSelectedSystemObject();
+    if (selectedObject && selectedObject.systemId === getState().selectedSystemId) {
+      const selectedObj = this.systemObjects.find(obj => obj.objectId === selectedObject.objectId);
+      if (selectedObj) {
+        const pos = this.hexToPixel(selectedObj.coord.q, selectedObj.coord.r, centerX, centerY);
+        const selectedStyle = getHighlightStyle('selected');
+        this.drawHexOutline(this.selectionLayer, pos.x, pos.y, this.HEX_SIZE + 3, selectedStyle.stroke, selectedStyle.width);
+      }
+    }
+  }
+
   private drawSelection(): void {
     const viewX = (this.cameras.main.width - 800) / 2;
     const viewY = (this.cameras.main.height - 600) / 2;
@@ -716,16 +681,8 @@ export default class SystemScene extends Phaser.Scene {
     this.selectionLayer.clear();
     this.rangeLayer.clear();
 
-    if (!this.selectedObjectId) return;
-
-    const obj = this.systemObjects.find(o => o.id === this.selectedObjectId);
-    if (!obj) return;
-
-    const pos = this.hexToPixel(obj.coord.q, obj.coord.r, centerX, centerY);
-    
-    // Draw selection highlight on dedicated layer
-    const selectedStyle = getHighlightStyle('selected');
-    this.drawHexOutline(this.selectionLayer, pos.x, pos.y, this.HEX_SIZE + 2, selectedStyle.stroke, selectedStyle.width);
+    // Use new highlight system
+    this.refreshHighlights();
   }
 
   private drawHexOutline(
@@ -772,6 +729,14 @@ export default class SystemScene extends Phaser.Scene {
       return;
     }
 
+    // Sync selection with core state
+    const selectedObject = getSelectedSystemObject();
+    if (selectedObject && selectedObject.systemId === systemId) {
+      this.selectedObjectId = selectedObject.objectId;
+    } else {
+      this.selectedObjectId = null;
+    }
+
     // System information
     const isBeingMined = isSystemBeingMined(systemId);
     const miningStatus = isBeingMined ? '⛏️ MINING' : '';
@@ -806,8 +771,9 @@ export default class SystemScene extends Phaser.Scene {
       `Fleets: ${playerFleets.length} player, ${enemyFleets.length} enemy | ESC to close | Tab: Next | 1-4: Select by type | M/Space: Mine | I: Invade Planet | R: Reinforce Planet`
     ];
 
-    if (this.selectedObjectId) {
-      const selected = this.systemObjects.find(o => o.id === this.selectedObjectId);
+    // Show selected object info
+    if (selectedObject && selectedObject.systemId === systemId) {
+      const selected = this.systemObjects.find(o => o.objectId === selectedObject.objectId);
       if (selected) {
         lines.push('');
         lines.push(`SELECTED: ${selected.name} (${selected.type})`);
@@ -859,42 +825,8 @@ export default class SystemScene extends Phaser.Scene {
     this.drawSelection();
   }
 
-  private mineSelectedAsteroid(): void {
-    if (!this.selectedObjectId) return;
-
-    const selected = this.systemObjects.find(o => o.id === this.selectedObjectId);
-    if (!selected || selected.type !== 'asteroid') return;
-
-    const state = getState();
-    const systemId = state.selectedSystemId;
-    if (!systemId) return;
-
-    const system = state.galaxy[systemId];
-    if (system?.asteroids && system.asteroids.yieldRemaining <= 0) {
-      // Visual feedback for depleted asteroid
-      this.showMiningFeedback(selected, 'DEPLETED', 0xff6666);
-      return;
-    }
-
-    const success = mineAsteroid(systemId, selected.id);
-    if (success) {
-      // Show success feedback with player color
-      const yieldRemaining = system?.asteroids?.yieldRemaining ?? 100;
-      this.showMiningFeedback(selected, `MINED! (${yieldRemaining.toFixed(1)}% left)`, 0x4a9eff); // BLUE for success
-      
-      // Update asteroid visual if depleted
-      if (system?.asteroids && system.asteroids.yieldRemaining <= 0) {
-        // Change asteroid to depleted appearance
-        selected.marker.setFillStyle(0x666666, 1);
-        selected.icon.setText('💀');
-      }
-    } else {
-      // Show failure feedback
-      this.showMiningFeedback(selected, 'MINING FAILED', 0xff4444); // RED for failure
-    }
-
-    this.refresh();
-  }
+  // Legacy mining method removed - now handled by mineSelectedObject() in core
+  // Mining feedback is now handled by the core action system
 
   private showMiningFeedback(obj: SystemObject, message: string, color: number): void {
     // Create temporary text feedback
