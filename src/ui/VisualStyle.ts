@@ -1,6 +1,10 @@
 // src/ui/VisualStyle.ts
 // -----------------------------------------------------------------------------
 // One place to lock visuals
+// 
+// IMPORTANT: Affiliation colors have moved to src/ui/colors.ts
+// Use getAffiliationColor() and getHighlightStyle() for all color decisions.
+// Do NOT use hardcoded color values like 0x00ff00, 0x0000ff, etc.
 // -----------------------------------------------------------------------------
 
 export const VisualStyle = {
@@ -15,16 +19,12 @@ export const VisualStyle = {
   font: '16px Consolas, Menlo, monospace',
   smallFont: '14px Consolas, Menlo, monospace',
 
-  // Colors
+  // Background
   bg: 0x070a10,
-  gridUnknown: 0x4a4f5a,
-  gridFriendly: 0x49b36d,
-  gridControlled: 0x2f72ff,
 
+  // System nodes (base colors, affiliation handled by colors.ts)
   systemNode: 0x8aa0c7,
   systemUnknown: 0x3a3f4a,
-
-  selection: 0xffffff,
 
   // UI text colors (strings for Phaser text)
   uiText: '#CFE3FF',

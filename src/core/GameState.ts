@@ -29,7 +29,9 @@ import {
   SystemIntel,
   StarSystem,
   PlanetController,
-  HexCoord
+  HexCoord,
+  SystemObjectType,
+  SystemObjectRef
 } from './types';
 
 import { hexDistance } from '../utils/hex';
@@ -481,6 +483,91 @@ export function selectFleet(fleetId: string): void {
   if (f.owner !== 'PLAYER') return; // player can only directly select player fleets
   state.selectedFleetId = fleetId;
   pushIntel('SYSTEM', `FLEET: ${f.name} selected.`);
+}
+
+// -----------------------------------------------------------------------------
+// System Object Selection
+// -----------------------------------------------------------------------------
+
+export function selectSystemObject(systemId: string, objectId: string): void {
+  const system = state.galaxy[systemId];
+  if (!system) {
+    state.selectedSystemObject = null;
+    return;
+  }
+
+  // Validate object exists in system
+  const objects = listSystemObjects(systemId);
+  const objectExists = objects.some(obj => obj.objectId === objectId);
+  
+  if (objectExists) {
+    state.selectedSystemObject = { systemId, objectId };
+    pushIntel('SYSTEM', `OBJECT: ${objectId} selected in ${system.name}.`);
+  } else {
+    state.selectedSystemObject = null;
+  }
+}
+
+export function getSelectedSystemObject(): { systemId: string; objectId: string } | null {
+  return state.selectedSystemObject;
+}
+
+export function listSystemObjects(systemId: string): SystemObjectRef[] {
+  const system = state.galaxy[systemId];
+  if (!system) return [];
+
+  const objects: SystemObjectRef[] = [];
+  let objectIndex = 0;
+
+  // Add asteroids if present
+  if (system.asteroids) {
+    objects.push({
+      systemId,
+      objectId: `${systemId}:asteroid:0`,
+      type: 'asteroid',
+      coord: { q: 0, r: 0 } // Will be overridden by scene positioning
+    });
+    objectIndex++;
+  }
+
+  // Add station if present
+  if (system.station) {
+    objects.push({
+      systemId,
+      objectId: `${systemId}:station:${system.station.id}`,
+      type: 'station',
+      coord: { q: 0, r: 0 } // Will be overridden by scene positioning
+    });
+    objectIndex++;
+  }
+
+  // Add planets if present
+  if (system.planets) {
+    for (const [planetId, planet] of Object.entries(system.planets)) {
+      objects.push({
+        systemId,
+        objectId: `${systemId}:planet:${planetId}`,
+        type: 'planet',
+        coord: { q: 0, r: 0 } // Will be overridden by scene positioning
+      });
+      objectIndex++;
+    }
+  }
+
+  // Add procedural anomalies (deterministic based on system seed)
+  if (system.type === 'ANOMALY' || system.type === 'RUIN') {
+    const anomalyCount = system.type === 'ANOMALY' ? 1 : Math.floor(system.seed % 3) + 1;
+    for (let i = 0; i < anomalyCount; i++) {
+      objects.push({
+        systemId,
+        objectId: `${systemId}:anomaly:${i}`,
+        type: 'anomaly',
+        coord: { q: 0, r: 0 } // Will be overridden by scene positioning
+      });
+    }
+  }
+
+  return objects;
 }
 
 export function moveFleet(fleetId: string, targetSystemId: string): boolean {

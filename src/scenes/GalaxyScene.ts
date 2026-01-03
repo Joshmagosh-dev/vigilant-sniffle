@@ -35,6 +35,7 @@ import {
 import { VisualStyle } from '../ui/VisualStyle';
 import { getEntityGlyph, getFleetGlyph, fleetColor, systemGlyph } from '../ui/IconKit';
 import { hexDistance } from '../utils/hex';
+import { getSystemAffiliation, getAffiliationColor, getHighlightStyle } from '../ui/colors';
 
 type SysRender = {
   id: string;
@@ -66,6 +67,7 @@ export default class GalaxyScene extends Phaser.Scene {
 
   private gridLayer!: Phaser.GameObjects.Graphics;
   private selectionLayer!: Phaser.GameObjects.Graphics;
+  private rangeLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for reachable highlights
 
   private systems: SysRender[] = [];
 
@@ -86,6 +88,7 @@ export default class GalaxyScene extends Phaser.Scene {
 
     this.gridLayer = this.add.graphics();
     this.selectionLayer = this.add.graphics();
+    this.rangeLayer = this.add.graphics(); // NEW: range layer drawn after grid but before selection
 
     // Build system render cache
     this.rebuildSystemRenderables();
@@ -324,6 +327,7 @@ export default class GalaxyScene extends Phaser.Scene {
   update(): void {
     // Repaint grid + selection each frame (cheap enough for small maps)
     this.drawGrid();
+    this.drawRangeHighlights(); // NEW: draw reachable highlights on dedicated layer
     this.drawSelection();
   }
 
@@ -476,24 +480,44 @@ export default class GalaxyScene extends Phaser.Scene {
     const g = this.gridLayer;
     g.clear();
 
-    // Decide a "controlled / friendly / unknown" rule:
-    // - Controlled: player has any fleet at system (green)
-    // - Friendly: scanned but no fleet (blue)
-    // - Enemy: enemy fleet present (red)
-    // - Unknown: intel unknown (grey)
+    // Use affiliation resolver for consistent colors
     const playerLocations = new Set(Object.values(s.fleets).filter(f => f.owner === 'PLAYER').map(f => f.location));
     const enemyLocations = new Set(Object.values(s.fleets).filter(f => f.owner === 'ENEMY').map(f => f.location));
 
     for (const sys of Object.values(s.galaxy)) {
       const c = this.hexToPixel(sys.coord.q, sys.coord.r);
+      
+      // Determine affiliation and get color
+      const hasPlayerFleet = playerLocations.has(sys.id);
+      const hasEnemyFleet = enemyLocations.has(sys.id);
+      const affiliation = getSystemAffiliation(sys.id, hasPlayerFleet, hasEnemyFleet, sys.intel);
+      const colors = getAffiliationColor(affiliation);
+      
+      // Use affiliation color for grid (stroke only)
+      this.drawHexOutline(g, c.x, c.y, this.HEX_SIZE, colors.stroke, VisualStyle.gridLineWidth);
+    }
+  }
 
-      let colorNum = 0x4a4f5a; // grey for unknown
-      if (sys.intel === 'UNKNOWN') colorNum = 0x4a4f5a; // grey
-      else if (playerLocations.has(sys.id)) colorNum = 0x49b36d; // green (controlled)
-      else if (enemyLocations.has(sys.id)) colorNum = 0xff5b5b; // red (enemy)
-      else colorNum = 0x4a9eff; // blue (friendly/scanned)
+  // NEW: Dedicated method for reachable highlights
+  private drawRangeHighlights(): void {
+    const s = getState();
+    const g = this.rangeLayer;
+    g.clear();
 
-      this.drawHexOutline(g, c.x, c.y, this.HEX_SIZE, colorNum, VisualStyle.gridLineWidth);
+    // If fleet selected, show reachable ring (adjacent) - stroke only
+    if (s.selectedFleetId) {
+      const f = s.fleets[s.selectedFleetId];
+      const from = s.galaxy[f.location];
+      if (!from) return;
+
+      const reachableStyle = getHighlightStyle('reachable');
+      g.lineStyle(reachableStyle.width, reachableStyle.stroke, reachableStyle.alpha);
+
+      for (const other of Object.values(s.galaxy)) {
+        if (hexDistance(from.coord, other.coord) !== 1) continue;
+        const p = this.hexToPixel(other.coord.q, other.coord.r);
+        this.drawHexOutline(g, p.x, p.y, this.HEX_SIZE - 6, reachableStyle.stroke, reachableStyle.width);
+      }
     }
   }
 
@@ -507,8 +531,9 @@ export default class GalaxyScene extends Phaser.Scene {
     const sys = s.galaxy[s.selectedSystemId];
     if (!sys) return;
 
+    const selectedStyle = getHighlightStyle('selected');
     const c = this.hexToPixel(sys.coord.q, sys.coord.r);
-    this.drawHexOutline(g, c.x, c.y, this.HEX_SIZE + 3, VisualStyle.selection, 3);
+    this.drawHexOutline(g, c.x, c.y, this.HEX_SIZE + 3, selectedStyle.stroke, selectedStyle.width);
 
     // Draw selected fleet location (if different from selected system)
     if (s.selectedFleetId) {
@@ -517,8 +542,9 @@ export default class GalaxyScene extends Phaser.Scene {
         const fleetSystem = s.galaxy[fleet.location];
         if (fleetSystem) {
           const f = this.hexToPixel(fleetSystem.coord.q, fleetSystem.coord.r);
-          // Draw a smaller, different colored outline for fleet location
-          this.drawHexOutline(g, f.x, f.y, this.HEX_SIZE + 1, 0x4a9eff, 2);
+          // Use hover style for fleet location indicator
+          const hoverStyle = getHighlightStyle('hover');
+          this.drawHexOutline(g, f.x, f.y, this.HEX_SIZE + 1, hoverStyle.stroke, hoverStyle.width);
         }
       }
     }
@@ -553,21 +579,8 @@ export default class GalaxyScene extends Phaser.Scene {
           g.strokePath();
         }
         
-        // Highlight target system
+        // Highlight target system with planned move style (orange)
         this.drawHexOutline(g, toPos.x, toPos.y, this.HEX_SIZE + 2, 0xffaa00, 3);
-      }
-    }
-
-    // If fleet selected, show reachable ring (adjacent)
-    if (s.selectedFleetId) {
-      const f = s.fleets[s.selectedFleetId];
-      const from = s.galaxy[f.location];
-      if (!from) return;
-
-      for (const other of Object.values(s.galaxy)) {
-        if (hexDistance(from.coord, other.coord) !== 1) continue;
-        const p = this.hexToPixel(other.coord.q, other.coord.r);
-        this.drawHexOutline(g, p.x, p.y, this.HEX_SIZE - 6, VisualStyle.selection, 1);
       }
     }
   }

@@ -10,6 +10,7 @@
 import Phaser from 'phaser';
 import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController } from '../core/GameState';
 import { VisualStyle } from '../ui/VisualStyle';
+import { getAffiliationColor, getHighlightStyle, getStationAffiliation, getPlanetAffiliation } from '../ui/colors';
 
 type StationState = 'FRIENDLY' | 'ENEMY' | 'DERELICT';
 
@@ -44,6 +45,7 @@ export default class SystemScene extends Phaser.Scene {
   private background!: Phaser.GameObjects.Graphics;
   private gridLayer!: Phaser.GameObjects.Graphics;
   private selectionLayer!: Phaser.GameObjects.Graphics;
+  private rangeLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for highlights
   private infoText!: Phaser.GameObjects.Text;
 
   private systemObjects: SystemObject[] = [];
@@ -75,6 +77,7 @@ export default class SystemScene extends Phaser.Scene {
     // Grid and selection layers (clipped to panel)
     this.gridLayer = this.add.graphics();
     this.selectionLayer = this.add.graphics();
+    this.rangeLayer = this.add.graphics(); // NEW: range layer for highlights
 
     // NOTE: This doesn't truly clip rendering, but keeps your existing behavior.
     // If you want real clipping later, we can add a geometry mask.
@@ -356,66 +359,55 @@ export default class SystemScene extends Phaser.Scene {
     for (const obj of this.systemObjects) {
       const pos = this.hexToPixel(obj.coord.q, obj.coord.r, centerX, centerY);
 
-      // Marker based on type and state
-      let color: number;
+      // Use affiliation resolver for consistent colors
+      let affiliationColors: { fill?: number; stroke: number; hollow?: boolean };
       let size: number;
 
       switch (obj.type) {
         case 'planet':
-          // Color based on planet controller
-          switch (obj.planetController) {
-            case 'PLAYER':
-              color = 0x00ff00; // Green for player controlled
-              break;
-            case 'ENEMY':
-              color = 0xff4444; // Red for enemy controlled
-              break;
-            case 'CONTESTED':
-              color = 0xffaa00; // Orange for contested
-              break;
-            case 'NEUTRAL':
-              color = 0x4a9eff; // Blue for neutral
-              break;
-            default:
-              color = 0x4a9eff;
-          }
+          // Use planet affiliation resolver
+          const planetAffiliation = getPlanetAffiliation(obj.planetController || 'NEUTRAL');
+          affiliationColors = getAffiliationColor(planetAffiliation);
           size = 8;
           break;
         case 'asteroid':
-          // Show depletion status in color
+          // Asteroids use special status colors (not affiliation)
           if (system?.asteroids && system.asteroids.yieldRemaining <= 0) {
-            color = 0x666666; // Gray for depleted
+            affiliationColors = { fill: 0x666666, stroke: 0x666666 }; // Gray for depleted
           } else if (isBeingMined) {
-            color = 0xffaa00; // Orange for being mined
+            affiliationColors = { fill: 0xffaa00, stroke: 0xffaa00 }; // Orange for being mined
           } else {
-            color = 0x8b7355; // Brown for normal
+            affiliationColors = { fill: 0x8b7355, stroke: 0x8b7355 }; // Brown for normal
           }
           size = 4;
           break;
         case 'station':
-          // Color based on station state
-          switch (obj.stationState) {
-            case 'FRIENDLY':
-              color = 0x00ff00; // Green
-              break;
-            case 'ENEMY':
-              color = 0xff4444; // Red
-              break;
-            case 'DERELICT':
-              color = 0xffaa00; // Orange
-              break;
-            default:
-              color = 0xffd700; // Gold default
-          }
+          // Use station affiliation resolver
+          const stationAffiliation = getStationAffiliation(obj.stationState || 'NEUTRAL');
+          affiliationColors = getAffiliationColor(stationAffiliation);
           size = 6;
           break;
         case 'anomaly':
-          color = 0xff44ff;
+          affiliationColors = { fill: 0xff44ff, stroke: 0xff44ff }; // Magenta for anomalies
           size = 7;
           break;
+        default:
+          affiliationColors = { fill: 0x4a4f5a, stroke: 0x4a4f5a }; // Gray fallback
+          size = 6;
       }
 
-      obj.marker = this.add.circle(pos.x, pos.y, size, color, 1);
+      // Create marker with affiliation colors (hollow if derelict)
+      if (affiliationColors.hollow) {
+        obj.marker = this.add.circle(pos.x, pos.y, size, 0x000000, 0); // No fill
+        // Add stroke separately for hollow objects
+        const strokeGraphics = this.add.graphics();
+        strokeGraphics.lineStyle(2, affiliationColors.stroke, 1);
+        strokeGraphics.strokeCircle(pos.x, pos.y, size);
+        // Store stroke graphics as a property (we'll need to clean it up later)
+        (obj.marker as any).strokeGraphics = strokeGraphics;
+      } else {
+        obj.marker = this.add.circle(pos.x, pos.y, size, affiliationColors.fill || affiliationColors.stroke, 1);
+      }
 
       // ICON (RIGHT of marker) - add control indicators
       let iconText = this.objectIcon(obj.type);
@@ -603,7 +595,7 @@ export default class SystemScene extends Phaser.Scene {
     );
 
     if (!playerCombatFleet) {
-      this.showPlanetFeedback(selected, 'NO COMBAT FLEET IN SYSTEM', 0xff4444);
+      this.showPlanetFeedback(selected, 'NO COMBAT FLEET IN SYSTEM', 0xff4444); // RED for error
       return;
     }
 
@@ -614,11 +606,11 @@ export default class SystemScene extends Phaser.Scene {
 
     const success = invadePlanet(systemId, selected.id, playerCombatFleet.id);
     if (success) {
-      this.showPlanetFeedback(selected, 'PLANET CONQUERED!', 0x00ff00);
+      this.showPlanetFeedback(selected, 'PLANET CONQUERED!', 0x4a9eff); // BLUE for success (player color)
       selected.planetController = 'PLAYER';
       selected.planetTroops = (selected.planetTroops || 0) + 30; // Occupation troops
     } else {
-      this.showPlanetFeedback(selected, 'INVASION FAILED!', 0xff4444);
+      this.showPlanetFeedback(selected, 'INVASION FAILED!', 0xff4444); // RED for failure
     }
 
     this.refresh();
@@ -641,21 +633,21 @@ export default class SystemScene extends Phaser.Scene {
     );
 
     if (!playerFleet) {
-      this.showPlanetFeedback(selected, 'NO FLEET IN SYSTEM', 0xff4444);
+      this.showPlanetFeedback(selected, 'NO FLEET IN SYSTEM', 0xff4444); // RED for error
       return;
     }
 
     if (selected.planetController !== 'PLAYER') {
-      this.showPlanetFeedback(selected, 'MUST CONTROL PLANET FIRST', 0xff4444);
+      this.showPlanetFeedback(selected, 'MUST CONTROL PLANET FIRST', 0xff4444); // RED for error
       return;
     }
 
     const success = reinforcePlanet(systemId, selected.id, playerFleet.id);
     if (success) {
-      this.showPlanetFeedback(selected, 'PLANET REINFORCED!', 0x00ff00);
+      this.showPlanetFeedback(selected, 'PLANET REINFORCED!', 0x4a9eff); // BLUE for success (player color)
       selected.planetTroops = (selected.planetTroops || 0) + 20;
     } else {
-      this.showPlanetFeedback(selected, 'REINFORCEMENT FAILED!', 0xff4444);
+      this.showPlanetFeedback(selected, 'REINFORCEMENT FAILED!', 0xff4444); // RED for failure
     }
 
     this.refresh();
@@ -670,9 +662,10 @@ export default class SystemScene extends Phaser.Scene {
       { font: VisualStyle.smallFont, color: `#${color.toString(16).padStart(6, '0')}` }
     ).setOrigin(0.5, 1);
 
-    // Flash the planet marker
+    // Flash the planet marker with highlight style (temporary)
     const originalColor = obj.marker.fillColor;
-    obj.marker.setFillStyle(color, 1);
+    const flashStyle = getHighlightStyle('selected');
+    obj.marker.setFillStyle(flashStyle.stroke, 1);
     
     // Animate feedback
     this.tweens.add({
@@ -698,9 +691,9 @@ export default class SystemScene extends Phaser.Scene {
 
     this.gridLayer.clear();
 
-    // Check if system has stations for blue border
+    // Check if system has stations for border color
     const hasStations = this.systemObjects.some(obj => obj.type === 'station');
-    const borderColor = hasStations ? 0x4a9eff : 0x2a3f5f;
+    const borderColor = hasStations ? 0x4a9eff : 0x2a3f5f; // BLUE if stations, dark gray otherwise
 
     const maxRadius = 4;
     for (let q = -maxRadius; q <= maxRadius; q++) {
@@ -719,7 +712,9 @@ export default class SystemScene extends Phaser.Scene {
     const centerX = viewX + 400;
     const centerY = viewY + 300;
 
+    // Clear both selection and range layers
     this.selectionLayer.clear();
+    this.rangeLayer.clear();
 
     if (!this.selectedObjectId) return;
 
@@ -727,7 +722,10 @@ export default class SystemScene extends Phaser.Scene {
     if (!obj) return;
 
     const pos = this.hexToPixel(obj.coord.q, obj.coord.r, centerX, centerY);
-    this.drawHexOutline(this.selectionLayer, pos.x, pos.y, this.HEX_SIZE + 2, 0xffffff, 2);
+    
+    // Draw selection highlight on dedicated layer
+    const selectedStyle = getHighlightStyle('selected');
+    this.drawHexOutline(this.selectionLayer, pos.x, pos.y, this.HEX_SIZE + 2, selectedStyle.stroke, selectedStyle.width);
   }
 
   private drawHexOutline(
@@ -856,7 +854,7 @@ export default class SystemScene extends Phaser.Scene {
 
     this.infoText.setText(lines.join('\n'));
 
-    // Redraw grid and selection
+    // Redraw grid and selection layers
     this.drawHexGrid();
     this.drawSelection();
   }
@@ -880,9 +878,9 @@ export default class SystemScene extends Phaser.Scene {
 
     const success = mineAsteroid(systemId, selected.id);
     if (success) {
-      // Show success feedback
+      // Show success feedback with player color
       const yieldRemaining = system?.asteroids?.yieldRemaining ?? 100;
-      this.showMiningFeedback(selected, `MINED! (${yieldRemaining.toFixed(1)}% left)`, 0x00ff00);
+      this.showMiningFeedback(selected, `MINED! (${yieldRemaining.toFixed(1)}% left)`, 0x4a9eff); // BLUE for success
       
       // Update asteroid visual if depleted
       if (system?.asteroids && system.asteroids.yieldRemaining <= 0) {
@@ -892,7 +890,7 @@ export default class SystemScene extends Phaser.Scene {
       }
     } else {
       // Show failure feedback
-      this.showMiningFeedback(selected, 'MINING FAILED', 0xff4444);
+      this.showMiningFeedback(selected, 'MINING FAILED', 0xff4444); // RED for failure
     }
 
     this.refresh();
@@ -907,9 +905,10 @@ export default class SystemScene extends Phaser.Scene {
       { font: VisualStyle.smallFont, color: `#${color.toString(16).padStart(6, '0')}` }
     ).setOrigin(0.5, 1);
 
-    // Flash the asteroid marker
+    // Flash the asteroid marker with highlight style (temporary)
     const originalColor = obj.marker.fillColor;
-    obj.marker.setFillStyle(color, 1);
+    const flashStyle = getHighlightStyle('selected');
+    obj.marker.setFillStyle(flashStyle.stroke, 1);
     
     // Animate feedback
     this.tweens.add({

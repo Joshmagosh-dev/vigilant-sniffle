@@ -22,6 +22,15 @@ export type Resources = {
 
 export type SystemIntel = 'UNKNOWN' | 'SCANNED';
 
+export type SystemObjectType = 'planet' | 'asteroid' | 'station' | 'anomaly';
+
+export type SystemObjectRef = {
+  systemId: string;
+  objectId: string;
+  type: SystemObjectType;
+  coord: HexCoord;
+};
+
 export type StarSystemType = 
   | 'EMPTY_SPACE' 
   | 'MINING_SYSTEM' 
@@ -181,6 +190,7 @@ export type GameState = {
   // Selected ids (UI reads these)
   selectedSystemId: string | null;
   selectedFleetId: string | null;
+  selectedSystemObject: { systemId: string; objectId: string } | null;
 
   resources: Resources;
 
