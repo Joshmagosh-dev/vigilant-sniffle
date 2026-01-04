@@ -8,7 +8,7 @@
 // -----------------------------------------------------------------------------
 
 import Phaser from 'phaser';
-import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController, selectSystemObject, getSelectedSystemObject, mineSelectedObject, invadeSelectedObject, reinforceSelectedObject, listSystemObjects, createPlanet, setFleetAnchor } from '../core/GameState';
+import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController, selectSystemObject, getSelectedSystemObject, mineSelectedObject, invadeSelectedObject, reinforceSelectedObject, listSystemObjects, createPlanet, setFleetAnchor, moveFleetInSystem } from '../core/GameState';
 import { startInvasion, getOngoingInvasions } from '../core/Invasion';
 import { reinforcePlanet as reinforcePlanetLegacy, getReinforcementCapacity } from '../core/Reinforcement';
 import { VisualStyle } from '../ui/VisualStyle';
@@ -66,6 +66,7 @@ export default class SystemScene extends Phaser.Scene {
   private rangeLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for highlights
   private hoverLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for hover highlights
   private infoText!: Phaser.GameObjects.Text;
+  private debugText!: Phaser.GameObjects.Text; // NEW: debug text for input verification
 
   private systemObjects: SystemObject[] = [];
   private selectedObjectId: string | null = null;
@@ -73,6 +74,35 @@ export default class SystemScene extends Phaser.Scene {
 
   // Fleet sprites for system view
   private systemFleetSprites: Record<string, Phaser.GameObjects.Container> = {};
+
+  // Animation state
+  private isUnitAnimating = false;
+  private animationQueue: Array<{fleetId: string; targetHex: { q: number; r: number }}> = [];
+
+  // Drag state for fleet positioning
+  private dragState: {
+    fleetId: string;
+    startPos: { x: number; y: number };
+    ghost?: Phaser.GameObjects.Container;
+  } | null = null;
+
+  // Diagnostic state
+  private debugOverlay!: Phaser.GameObjects.Text;
+  private debugState = {
+    activeScenes: [] as string[],
+    inputEnabled: false,
+    pointerScreen: { x: 0, y: 0 },
+    pointerWorld: { x: 0, y: 0 },
+    pickedHex: { q: 0, r: 0 },
+    selectedObjectId: '',
+    selectedObjectType: '',
+    selectedFleetId: '',
+    lastAction: '',
+    lastResult: '',
+    isAnimating: false,
+    galaxyScenePaused: false,
+    systemSceneTopmost: false
+  };
 
   constructor() {
     super({ key: 'SystemScene' });
@@ -114,6 +144,20 @@ export default class SystemScene extends Phaser.Scene {
       color: VisualStyle.uiText
     });
 
+    // Debug text for input verification (NEW)
+    this.debugText = this.add.text(viewX + 20, viewY + viewHeight - 40, 'DEBUG: Ready for input', {
+      font: '14px monospace',
+      color: '#00ff00'
+    });
+
+    // Diagnostic overlay (top-left, always visible)
+    this.debugOverlay = this.add.text(10, 10, '', {
+      font: '12px monospace',
+      color: '#ffff00',
+      backgroundColor: '#000000',
+      padding: { x: 8, y: 8 }
+    }).setScrollFactor(0).setDepth(1000);
+
     // Generate system contents
     this.generateSystemContents();
 
@@ -122,6 +166,53 @@ export default class SystemScene extends Phaser.Scene {
 
     // Initial render
     this.refresh();
+    
+    // Start diagnostic updates
+    this.updateDiagnostics();
+  }
+
+  private updateDiagnostics(): void {
+    // Update scene info
+    this.debugState.activeScenes = this.scene.manager.getScenes(true).map(s => s.scene.key);
+    this.debugState.inputEnabled = this.input.enabled;
+    this.debugState.isAnimating = this.isUnitAnimating;
+    
+    // Check modal state
+    const galaxyScene = this.scene.manager.getScene('GalaxyScene');
+    this.debugState.galaxyScenePaused = galaxyScene ? this.scene.manager.isPaused('GalaxyScene') : false;
+    this.debugState.systemSceneTopmost = this.debugState.activeScenes[0] === 'SystemScene';
+    
+    // Update selected object info
+    const state = getState();
+    this.debugState.selectedObjectId = this.selectedObjectId || 'none';
+    this.debugState.selectedFleetId = state.selectedFleetId || 'none';
+    
+    if (this.selectedObjectId) {
+      const selected = this.systemObjects.find(obj => obj.id === this.selectedObjectId);
+      this.debugState.selectedObjectType = selected ? selected.type : 'unknown';
+    } else {
+      this.debugState.selectedObjectType = 'none';
+    }
+    
+    // Update overlay text
+    const overlayText = [
+      `=== SYSTEMSCENE DIAGNOSTICS ===`,
+      `Active Scenes: ${this.debugState.activeScenes.join(', ')}`,
+      `SystemScene Topmost: ${this.debugState.systemSceneTopmost}`,
+      `GalaxyScene Paused: ${this.debugState.galaxyScenePaused}`,
+      `Input Enabled: ${this.debugState.inputEnabled}`,
+      `Is Animating: ${this.debugState.isAnimating}`,
+      `Pointer Screen: (${this.debugState.pointerScreen.x}, ${this.debugState.pointerScreen.y})`,
+      `Pointer World: (${this.debugState.pointerWorld.x.toFixed(0)}, ${this.debugState.pointerWorld.y.toFixed(0)})`,
+      `Picked Hex: (${this.debugState.pickedHex.q}, ${this.debugState.pickedHex.r})`,
+      `Selected Object: ${this.debugState.selectedObjectId} (${this.debugState.selectedObjectType})`,
+      `Selected Fleet: ${this.debugState.selectedFleetId}`,
+      `Last Action: ${this.debugState.lastAction}`,
+      `Last Result: ${this.debugState.lastResult}`,
+      `===============================`
+    ];
+    
+    this.debugOverlay.setText(overlayText.join('\n'));
   }
 
   // ---------------------------------------------------------------------------
@@ -515,6 +606,86 @@ export default class SystemScene extends Phaser.Scene {
   }
 
   // ---------------------------------------------------------------------------
+  // Movement handling with core integration
+  // ---------------------------------------------------------------------------
+
+  private tryMoveSelectedFleetTo(to: { q: number; r: number }): void {
+    const selectedFleetId = this.selectedObjectId;
+    if (!selectedFleetId) {
+      this.infoText.setText('No fleet selected');
+      this.debugState.lastResult = 'FAILED: No fleet selected';
+      this.updateDiagnostics();
+      return;
+    }
+
+    const state = getState();
+    const selectedFleet = state.fleets[selectedFleetId];
+    if (!selectedFleet) {
+      this.infoText.setText('Selected fleet not found');
+      this.debugState.lastResult = 'FAILED: Fleet not found';
+      this.updateDiagnostics();
+      return;
+    }
+
+    // Initialize system position if not set (for fleets entering systems)
+    if (!selectedFleet.systemPos) {
+      selectedFleet.systemPos = { q: 0, r: 0 }; // Start at center
+    }
+
+    const result = moveFleetInSystem(selectedFleetId, to);
+
+    if (!result.ok) {
+      this.infoText.setText(`Move failed: ${result.reason}`);
+      this.debugState.lastResult = `FAILED: ${result.reason}`;
+      this.updateDiagnostics();
+      return;
+    }
+
+    // Success: animate then refresh
+    if (this.isUnitAnimating) {
+      this.queueMovement(selectedFleetId, to);
+    } else {
+      this.animateFleetMovement(selectedFleetId, to);
+    }
+    
+    this.infoText.setText(`Moved to q=${to.q}, r=${to.r}`);
+    this.debugState.lastResult = `SUCCESS: Moved to (${to.q}, ${to.r})`;
+    this.updateDiagnostics();
+  }
+
+  private pixelToHex(x: number, y: number, centerX: number, centerY: number): { q: number; r: number } {
+    const size = this.HEX_SIZE;
+    const relX = (x - centerX) / size;
+    const relY = (y - centerY) / size;
+    
+    const q = (2/3) * relX;
+    const r = (-1/3) * relX + (Math.sqrt(3)/3) * relY;
+    
+    return this.hexRound(q, r);
+  }
+
+  private hexRound(q: number, r: number): { q: number; r: number } {
+    const s = -q - r;
+    let rq = Math.round(q);
+    let rr = Math.round(r);
+    let rs = Math.round(s);
+    
+    const qDiff = Math.abs(rq - q);
+    const rDiff = Math.abs(rr - r);
+    const sDiff = Math.abs(rs - s);
+    
+    if (qDiff > rDiff && qDiff > sDiff) {
+      rq = -rr - rs;
+    } else if (rDiff > sDiff) {
+      rr = -rq - rs;
+    } else {
+      rs = -rq - rr;
+    }
+    
+    return { q: rq, r: rr };
+  }
+
+  // ---------------------------------------------------------------------------
   // Input
   // ---------------------------------------------------------------------------
 
@@ -526,62 +697,263 @@ export default class SystemScene extends Phaser.Scene {
         return;
       }
 
-      // Tab to cycle through objects
-      if (e.key.toLowerCase() === 'tab') {
-        // Tab functionality can be added later if needed
-        return;
-      }
-
-      // M to mine selected asteroid
+      // M key for mining diagnostics
       if (e.key.toLowerCase() === 'm') {
-        mineSelectedObject();
-        this.refresh();
+        this.debugState.lastAction = 'MINING_ATTEMPT';
+        this.tryMineSelected();
         return;
       }
 
-      // Space to mine if asteroid selected
+      // SPACE key for mining
       if (e.key === ' ') {
-        mineSelectedObject();
-        this.refresh();
-        return;
-      }
-
-      // I to invade planet
-      if (e.key.toLowerCase() === 'i') {
-        this.handleInvasion();
-        this.refresh();
-        return;
-      }
-
-      // R to reinforce planet
-      if (e.key.toLowerCase() === 'r') {
-        this.handleReinforcement();
-        this.refresh();
-        return;
-      }
-
-      // Number keys to select objects by type (legacy - can be reimplemented later)
-      if (e.key >= '1' && e.key <= '4') {
-        // Type selection can be reimplemented later if needed
+        e.preventDefault();
+        this.debugState.lastAction = 'MINING_ATTEMPT';
+        this.tryMineSelected();
         return;
       }
     });
 
-    // Click to select objects
+    // Scene-level pointer handlers (MANDATORY - no .setInteractive() reliance)
+    this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      // Throttled pointer move updates
+      this.debugState.pointerScreen = { x: p.x, y: p.y };
+      const worldPos = p.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
+      this.debugState.pointerWorld = { x: worldPos.x, y: worldPos.y };
+      this.updateDiagnostics();
+    });
+
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
-      const viewX = (this.cameras.main.width - 800) / 2;
-      const viewY = (this.cameras.main.height - 600) / 2;
-      const centerX = viewX + 400;
-      const centerY = viewY + 300;
+      console.log('[SystemScene] pointerdown fired');
+      
+      // Update pointer coords
+      this.debugState.pointerScreen = { x: p.x, y: p.y };
+      const worldPos = p.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
+      this.debugState.pointerWorld = { x: worldPos.x, y: worldPos.y };
+      
+      console.log('[SystemScene] world coords:', this.debugState.pointerWorld);
+      
+      // Route through unified handler
+      this.onSystemPointerDown(worldPos.x, worldPos.y);
+      
+      // Update diagnostics
+      this.updateDiagnostics();
+    });
+  }
 
-      const world = p.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
-      const clicked = this.pickSystemObject(world.x, world.y, centerX, centerY);
+  // PHASE 2: Click Router Implementation
+  private onSystemPointerDown(worldX: number, worldY: number): void {
+    console.log('[SystemScene] onSystemPointerDown called with:', worldX, worldY);
+    
+    this.debugState.lastAction = 'POINTER_DOWN';
+    
+    // Block input during animation
+    if (this.isUnitAnimating) {
+      this.debugState.lastResult = 'FAILED: Animation in progress';
+      console.log('[SystemScene] input blocked - animating');
+      this.updateDiagnostics();
+      return;
+    }
 
-      if (clicked) {
-        this.selectedObjectId = clicked.id;
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+
+    // Convert to hex coordinates
+    const hex = this.pixelToHex(worldX, worldY, centerX, centerY);
+    this.debugState.pickedHex = hex;
+    
+    console.log('[SystemScene] picked hex:', hex);
+    
+    // Update debug text
+    this.debugText.setText(`DEBUG: World (${worldX.toFixed(0)}, ${worldY.toFixed(0)}) → Hex (${hex.q}, ${hex.r})`);
+
+    // Handle hex click
+    this.handleHexClick(hex.q, hex.r, worldX, worldY, centerX, centerY);
+  }
+
+  private findObjectAtHex(q: number, r: number): SystemObject | null {
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+    
+    const hexPos = this.hexToPixel(q, r, centerX, centerY);
+    
+    for (const obj of this.systemObjects) {
+      const objPos = this.hexToPixel(obj.coord.q, obj.coord.r, centerX, centerY);
+      const dx = hexPos.x - objPos.x;
+      const dy = hexPos.y - objPos.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      
+      if (d < this.PICK_RADIUS) {
+        return obj;
+      }
+    }
+    
+    return null;
+  }
+
+  private handleHexClick(q: number, r: number, worldX: number, worldY: number, centerX: number, centerY: number): void {
+    console.log('[SystemScene] handleHexClick called with hex:', q, r);
+    
+    // Debug: Show hex indicator
+    const hexPos = this.hexToPixel(q, r, centerX, centerY);
+    const debugHex = this.add.graphics()
+      .lineStyle(2, 0x00ff00, 1)
+      .strokeCircle(hexPos.x, hexPos.y, this.HEX_SIZE * 0.8);
+    
+    // Remove debug indicator after 500ms
+    this.time.delayedCall(500, () => {
+      debugHex.destroy();
+    });
+
+    const state = getState();
+    const systemId = state.selectedSystemId;
+    if (!systemId) {
+      this.debugState.lastResult = 'FAILED: No system selected';
+      this.updateDiagnostics();
+      return;
+    }
+
+    // Try to find object at hex
+    const clickedObject = this.findObjectAtHex(q, r);
+    
+    if (clickedObject) {
+      console.log('[SystemScene] found object:', clickedObject);
+      this.debugState.lastAction = 'SELECT_OBJECT';
+      this.debugState.lastResult = `OK: Selected ${clickedObject.type} "${clickedObject.id}"`;
+      this.selectedObjectId = clickedObject.id;
+      this.refresh();
+      this.updateDiagnostics();
+      return;
+    }
+
+    // Check for fleet at hex
+    const fleetAtHex = Object.values(state.fleets).find(f => 
+      f.owner === 'PLAYER' && 
+      f.location === systemId && 
+      f.systemPos && 
+      f.systemPos.q === q && 
+      f.systemPos.r === r
+    );
+
+    if (fleetAtHex) {
+      console.log('[SystemScene] found fleet:', fleetAtHex);
+      this.debugState.lastAction = 'SELECT_FLEET';
+      this.debugState.lastResult = `OK: Selected fleet "${fleetAtHex.name}"`;
+      this.selectedObjectId = fleetAtHex.id;
+      this.refresh();
+      this.updateDiagnostics();
+      return;
+    }
+
+    // Empty hex - try to move selected fleet
+    if (this.selectedObjectId) {
+      const selectedFleet = state.fleets[this.selectedObjectId];
+      if (selectedFleet && selectedFleet.location === systemId) {
+        console.log('[SystemScene] attempting fleet movement to:', q, r);
+        this.debugState.lastAction = 'MOVE_FLEET';
+        
+        // Use the new movement pipeline
+        this.tryMoveSelectedFleetTo({ q, r });
+        return;
+      }
+    }
+
+    // Empty hex with no fleet selected
+    console.log('[SystemScene] empty hex clicked');
+    this.debugState.lastAction = 'EMPTY_HEX';
+    this.debugState.lastResult = `OK: Empty hex (${q}, ${r})`;
+    this.selectedObjectId = null;
+    this.updateDiagnostics();
+    
+    // Update info text
+    const currentInfo = this.infoText.text;
+    this.infoText.setText(currentInfo + `\n[Picked hex ${q},${r}]`);
+    this.time.delayedCall(2000, () => { this.refresh(); });
+  }
+
+  
+  private getFleetHexPosition(anchor: Fleet['systemAnchor']): { q: number; r: number } {
+    // Convert systemAnchor to hex coordinates
+    if (!anchor) return { q: 0, r: 0 };
+    
+    if (anchor === 'STAR') {
+      return { q: 0, r: 0 };
+    }
+    
+    const parts = anchor.split(':');
+    if (parts.length !== 2) return { q: 0, r: 0 };
+    
+    const type = parts[0];
+    const id = parts[1];
+    
+    // For now, return a simple position based on type
+    // In a real implementation, you'd look up the actual object position
+    switch (type) {
+      case 'PLANET':
+      case 'ASTEROID':
+      case 'STATION':
+        // Find the object and return its position
+        const obj = this.systemObjects.find(o => o.id === id);
+        return obj ? obj.coord : { q: 0, r: 0 };
+      default:
+        return { q: 0, r: 0 };
+    }
+  }
+
+  private queueMovement(fleetId: string, targetHex: { q: number; r: number }): void {
+    // Simple queue implementation
+    if (!this.animationQueue) {
+      this.animationQueue = [];
+    }
+    this.animationQueue.push({ fleetId, targetHex });
+  }
+
+  private animateFleetMovement(fleetId: string, targetHex: { q: number; r: number }): void {
+    const sprite = this.systemFleetSprites[fleetId];
+    if (!sprite) return;
+
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+    
+    const targetPos = this.hexToPixel(targetHex.q, targetHex.r, centerX, centerY);
+    
+    // Set animation flag to block input
+    this.isUnitAnimating = true;
+    this.debugText.setText('DEBUG: Animating fleet movement...');
+    
+    this.tweens.add({
+      targets: sprite,
+      x: targetPos.x,
+      y: targetPos.y,
+      duration: 250,
+      ease: 'Sine.easeInOut',
+      onComplete: () => {
+        // Clear animation flag
+        this.isUnitAnimating = false;
+        this.debugText.setText('DEBUG: Fleet movement complete');
+        
+        // Core state was already updated by tryMoveSelectedFleetTo
+        // Just refresh visuals and process queue
+        this.processAnimationQueue();
+        
+        // Refresh UI to show updated positions
         this.refresh();
       }
     });
+  }
+
+  private processAnimationQueue(): void {
+    if (this.animationQueue && this.animationQueue.length > 0 && !this.isUnitAnimating) {
+      const next = this.animationQueue.shift();
+      if (next) {
+        this.animateFleetMovement(next.fleetId, next.targetHex);
+      }
+    }
   }
 
   private pickSystemObject(worldX: number, worldY: number, centerX: number, centerY: number): SystemObject | null {
@@ -1037,17 +1409,9 @@ export default class SystemScene extends Phaser.Scene {
     const systemId = state.selectedSystemId;
     
     if (!systemId) {
-      // Clear all fleet sprites if no system selected
-      for (const sprite of Object.values(this.systemFleetSprites)) {
-        sprite.destroy();
-      }
-      this.systemFleetSprites = {};
       return;
     }
-
-    const system = state.galaxy[systemId];
-    if (!system) return;
-
+    
     const viewX = (this.cameras.main.width - 800) / 2;
     const viewY = (this.cameras.main.height - 600) / 2;
     const centerX = viewX + 400;
@@ -1091,8 +1455,14 @@ export default class SystemScene extends Phaser.Scene {
     let x = centerX;
     let y = centerY;
 
-    // If fleet has an anchor, position near that object
-    if (fleet.systemAnchor) {
+    // If fleet has system position (hex-based), use that
+    if (fleet.systemPos) {
+      const hexPos = this.hexToPixel(fleet.systemPos.q, fleet.systemPos.r, centerX, centerY);
+      x = hexPos.x;
+      y = hexPos.y;
+    }
+    // Fallback to systemAnchor for compatibility
+    else if (fleet.systemAnchor) {
       const parts = fleet.systemAnchor.split(':');
       const anchorType = parts[0];
       const anchorId = parts[1];
@@ -1237,8 +1607,76 @@ export default class SystemScene extends Phaser.Scene {
     }
     this.systemFleetSprites = {};
 
+    // Stop SystemScene and wake GalaxyScene
     this.scene.stop();
-    this.scene.resume('GalaxyScene');
+    this.scene.wake('GalaxyScene');
+    
+    console.log('SystemScene closed, GalaxyScene resumed');
+  }
+
+  private tryMineSelected(): void {
+    const state = getState();
+    const systemId = state.selectedSystemId;
+    
+    if (!systemId) {
+      this.debugText.setText('DEBUG: No system selected');
+      return;
+    }
+
+    if (!this.selectedObjectId) {
+      this.debugText.setText('DEBUG: No object selected for mining');
+      return;
+    }
+
+    const selected = this.systemObjects.find(obj => obj.id === this.selectedObjectId);
+    if (!selected) {
+      this.debugText.setText('DEBUG: Selected object not found');
+      return;
+    }
+
+    if (selected.type !== 'asteroid') {
+      this.debugText.setText(`DEBUG: Cannot mine ${selected.type}, only asteroids`);
+      return;
+    }
+
+    // Check if already being mined
+    if (isSystemBeingMined(systemId)) {
+      this.debugText.setText('DEBUG: System already being mined this turn');
+      return;
+    }
+
+    // Attempt mining
+    const success = mineAsteroid(systemId, selected.id);
+    
+    if (success) {
+      this.debugText.setText('DEBUG: Mining successful!');
+      this.showMiningFeedback(selected, 'MINING!', 0x44ff44);
+      
+      // Update asteroid appearance
+      if (selected.marker) {
+        selected.marker.setFillStyle(0x666666, 1);
+      }
+      if (selected.icon) {
+        selected.icon.setText('💀');
+      }
+    } else {
+      this.debugText.setText('DEBUG: Mining failed');
+      this.showMiningFeedback(selected, 'MINING FAILED', 0xff4444);
+    }
+
+    this.refresh();
+  }
+
+  private selectObjectByType(type: number): void {
+    const types: ('planet' | 'asteroid' | 'station' | 'anomaly')[] = ['planet', 'asteroid', 'station', 'anomaly'];
+    const targetType = types[type - 1];
+    if (!targetType) return;
+
+    const target = this.systemObjects.find(obj => obj.type === targetType);
+    if (target) {
+      this.selectedObjectId = target.id;
+      this.refresh();
+    }
   }
 
   update(): void {

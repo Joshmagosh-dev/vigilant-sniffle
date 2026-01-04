@@ -427,6 +427,12 @@ export function buildStation(atSystemId: string, free: boolean = false): boolean
 }
 
 // -----------------------------------------------------------------------------
+// Action Result Types
+// -----------------------------------------------------------------------------
+
+export type ActionResult = { ok: true } | { ok: false; reason: string };
+
+// -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
 
@@ -590,6 +596,57 @@ export function listSystemObjects(systemId: string): SystemObjectRef[] {
   }
 
   return objects;
+}
+
+export function moveFleetInSystem(fleetId: string, to: HexCoord): ActionResult {
+  const f = state.fleets[fleetId];
+  if (!f) {
+    return { ok: false, reason: 'Fleet not found' };
+  }
+
+  if (state.phase !== 'PLAYER') {
+    return { ok: false, reason: 'Wrong phase' };
+  }
+
+  if (f.owner !== 'PLAYER') {
+    return { ok: false, reason: 'Cannot move enemy fleets' };
+  }
+
+  if (f.movesLeft <= 0) {
+    return { ok: false, reason: 'No moves left' };
+  }
+
+  // Check if fleet is in a system (has system position)
+  if (!f.systemPos) {
+    return { ok: false, reason: 'Fleet not positioned in system' };
+  }
+
+  // Check if destination is adjacent (hex distance of 1)
+  const from = f.systemPos;
+  const dist = hexDistance(from, to);
+  if (dist !== 1) {
+    return { ok: false, reason: 'Not adjacent' };
+  }
+
+  // Check if destination is blocked by another fleet
+  const blockingFleet = Object.values(state.fleets).find(other => 
+    other.id !== fleetId &&
+    other.location === f.location &&
+    other.systemPos &&
+    other.systemPos.q === to.q &&
+    other.systemPos.r === to.r
+  );
+
+  if (blockingFleet) {
+    return { ok: false, reason: 'Destination blocked' };
+  }
+
+  // Perform the move
+  f.systemPos = to;
+  f.movesLeft -= 1;
+
+  pushIntel('MOVE', `MOVE: ${f.name} moved within system to q=${to.q}, r=${to.r} (${f.movesLeft}/${f.maxMoves} MP)`);
+  return { ok: true };
 }
 
 export function moveFleet(fleetId: string, targetSystemId: string): boolean {

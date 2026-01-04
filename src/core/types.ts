@@ -167,6 +167,9 @@ export type Fleet = {
   // Location is a systemId (NOT a coord)
   location: string;
 
+  // NEW: System-level position for hex-based movement within systems
+  systemPos?: HexCoord;
+
   // NEW: System-level anchor for presentation (serializable)
   systemAnchor?: 'STAR' | `PLANET:${string}` | `ASTEROID:${string}` | `STATION:${string}`;
 

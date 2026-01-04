@@ -682,8 +682,20 @@ export default class GalaxyScene extends Phaser.Scene {
   }
 
   private openSystemView(): void {
+    // Disable GalaxyScene input to prevent interference
+    this.input.enabled = false;
+    
+    // Pause GalaxyScene and launch SystemScene
     this.scene.pause('GalaxyScene');
     this.scene.launch('SystemScene');
+    
+    // Listen for SystemScene shutdown to re-enable input
+    this.events.on('wake', () => {
+      this.input.enabled = true;
+      console.log('GalaxyScene input re-enabled');
+    });
+    
+    console.log('GalaxyScene input disabled, SystemScene launched');
   }
 
   // -----------------------------------------------------------------------------
