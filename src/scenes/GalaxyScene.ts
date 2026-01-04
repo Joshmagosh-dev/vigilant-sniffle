@@ -28,14 +28,16 @@ import {
   setTurnConfig,
   getTurnConfig,
   dismantleFleet,
+  getIntelLog,
   isSystemBeingMined,
   getMiningFleetAtSystem
 } from '../core/GameState';
 
 import { VisualStyle } from '../ui/VisualStyle';
 import { getEntityGlyph, getFleetGlyph, fleetColor, systemGlyph } from '../ui/IconKit';
-import { hexDistance } from '../utils/hex';
+import { createFleetIcon, createPulseAnimation, createFadeAnimation } from '../ui/IconFactory';
 import { getSystemAffiliation, getAffiliationColor, getHighlightStyle } from '../ui/colors';
+import { hexDistance } from '../utils/hex';
 
 type SysRender = {
   id: string;
@@ -70,6 +72,10 @@ export default class GalaxyScene extends Phaser.Scene {
   private rangeLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for reachable highlights
 
   private systems: SysRender[] = [];
+
+  // Fleet sprites for animation
+  private fleetSprites: Record<string, Phaser.GameObjects.Container> = {};
+  private prevFleetLocations: Record<string, string> = {}; // Track for animation triggers
 
   // UI text overlays
   private fleetListText!: Phaser.GameObjects.Text;
@@ -341,6 +347,7 @@ export default class GalaxyScene extends Phaser.Scene {
     this.refreshIntel();
     this.layoutHud();
     this.refreshSystemMarkers();
+    this.refreshFleets(); // NEW: Refresh fleet sprites with animation
   }
 
   private layoutHud(): void {
@@ -677,6 +684,89 @@ export default class GalaxyScene extends Phaser.Scene {
   private openSystemView(): void {
     this.scene.pause('GalaxyScene');
     this.scene.launch('SystemScene');
+  }
+
+  // -----------------------------------------------------------------------------
+  // Fleet Sprite Management
+  // -----------------------------------------------------------------------------
+
+  private refreshFleets(): void {
+    const state = getState();
+    
+    // Store previous locations for animation detection
+    const currentLocations: Record<string, string> = {};
+    
+    // Update or create fleet sprites
+    for (const [fleetId, fleet] of Object.entries(state.fleets)) {
+      currentLocations[fleetId] = fleet.location;
+      
+      const system = state.galaxy[fleet.location];
+      if (!system) continue;
+      
+      const pos = this.hexToPixel(system.coord.q, system.coord.r);
+      
+      if (this.fleetSprites[fleetId]) {
+        // Update existing sprite
+        const sprite = this.fleetSprites[fleetId];
+        sprite.setPosition(pos.x, pos.y);
+        
+        // Check if fleet moved and animate
+        if (this.prevFleetLocations[fleetId] && this.prevFleetLocations[fleetId] !== fleet.location) {
+          this.animateFleetToSystem(fleetId, this.prevFleetLocations[fleetId], fleet.location);
+        }
+      } else {
+        // Create new sprite
+        const sprite = createFleetIcon(
+          this,
+          pos.x,
+          pos.y,
+          fleet.owner,
+          fleet.role,
+          fleet.name
+        );
+        
+        this.fleetSprites[fleetId] = sprite;
+      }
+    }
+    
+    // Remove sprites for fleets that no longer exist
+    for (const fleetId of Object.keys(this.fleetSprites)) {
+      if (!state.fleets[fleetId]) {
+        this.fleetSprites[fleetId].destroy();
+        delete this.fleetSprites[fleetId];
+        delete this.prevFleetLocations[fleetId];
+      }
+    }
+    
+    // Update previous locations
+    this.prevFleetLocations = currentLocations;
+  }
+
+  private animateFleetToSystem(fleetId: string, fromSystemId: string, toSystemId: string): void {
+    const sprite = this.fleetSprites[fleetId];
+    if (!sprite) return;
+    
+    const state = getState();
+    const fromSystem = state.galaxy[fromSystemId];
+    const toSystem = state.galaxy[toSystemId];
+    
+    if (!fromSystem || !toSystem) return;
+    
+    const fromPos = this.hexToPixel(fromSystem.coord.q, fromSystem.coord.r);
+    const toPos = this.hexToPixel(toSystem.coord.q, toSystem.coord.r);
+    
+    // Animate movement
+    this.tweens.add({
+      targets: sprite,
+      x: toPos.x,
+      y: toPos.y,
+      duration: 300,
+      ease: 'Quad.easeInOut',
+      onComplete: () => {
+        // Ensure sprite ends at exact position
+        sprite.setPosition(toPos.x, toPos.y);
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------

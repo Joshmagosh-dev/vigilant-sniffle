@@ -8,9 +8,24 @@
 // -----------------------------------------------------------------------------
 
 import Phaser from 'phaser';
-import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController, selectSystemObject, getSelectedSystemObject, mineSelectedObject, invadeSelectedObject, reinforceSelectedObject, listSystemObjects } from '../core/GameState';
+import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController, selectSystemObject, getSelectedSystemObject, mineSelectedObject, invadeSelectedObject, reinforceSelectedObject, listSystemObjects, createPlanet, setFleetAnchor } from '../core/GameState';
+import { startInvasion, getOngoingInvasions } from '../core/Invasion';
+import { reinforcePlanet as reinforcePlanetLegacy, getReinforcementCapacity } from '../core/Reinforcement';
 import { VisualStyle } from '../ui/VisualStyle';
 import { getAffiliationColor, getHighlightStyle, getStationAffiliation, getPlanetAffiliation } from '../ui/colors';
+import { createFleetIcon, createPulseAnimation, createFadeAnimation } from '../ui/IconFactory';
+import type { Fleet } from '../core/types';
+
+// -----------------------------------------------------------------------------
+// Safe formatting helper to prevent crashes
+// -----------------------------------------------------------------------------
+
+function fmt(value: unknown, digits: number = 0): string {
+  if (typeof value === 'number' && isFinite(value)) {
+    return value.toFixed(digits);
+  }
+  return '—'; // Em dash for undefined/null/invalid values
+}
 
 type StationState = 'FRIENDLY' | 'ENEMY' | 'DERELICT';
 
@@ -55,6 +70,9 @@ export default class SystemScene extends Phaser.Scene {
   private systemObjects: SystemObject[] = [];
   private selectedObjectId: string | null = null;
   private hoveredObjectId: string | null = null;
+
+  // Fleet sprites for system view
+  private systemFleetSprites: Record<string, Phaser.GameObjects.Container> = {};
 
   constructor() {
     super({ key: 'SystemScene' });
@@ -164,6 +182,9 @@ export default class SystemScene extends Phaser.Scene {
         obj.planetController = controller;
         obj.planetTroops = controller === 'NEUTRAL' ? 0 : Math.floor(rng() * 50) + 20;
         obj.planetDefenses = Math.floor(rng() * 40) + 20;
+        
+        // Create the actual planet in core GameState
+        createPlanet(systemId, obj.id, controller);
       }
 
       this.systemObjects.push(obj);
@@ -379,7 +400,7 @@ export default class SystemScene extends Phaser.Scene {
           break;
         case 'asteroid':
           // Asteroids use special status colors (not affiliation)
-          if (system?.asteroids && system.asteroids.yieldRemaining <= 0) {
+          if (system?.asteroids && system.asteroids.yieldRemaining !== undefined && system.asteroids.yieldRemaining !== null && system.asteroids.yieldRemaining <= 0) {
             affiliationColors = { fill: 0x666666, stroke: 0x666666 }; // Gray for depleted
           } else if (isBeingMined) {
             affiliationColors = { fill: 0xffaa00, stroke: 0xffaa00 }; // Orange for being mined
@@ -458,13 +479,13 @@ export default class SystemScene extends Phaser.Scene {
         }
         // Show troop count
         if (obj.planetTroops && obj.planetTroops > 0) {
-          iconText += ` 👥${obj.planetTroops}`;
+          iconText += ` 👥${fmt(obj.planetTroops)}`;
         }
       } else if (obj.type === 'asteroid') {
         if (isBeingMined) {
           iconText += ' ⛏️'; // Add mining pickaxe
         }
-        if (system?.asteroids && system.asteroids.yieldRemaining <= 0) {
+        if (system?.asteroids && system.asteroids.yieldRemaining !== undefined && system.asteroids.yieldRemaining <= 0) {
           iconText = '💀'; // Skull for depleted
         }
       }
@@ -527,14 +548,14 @@ export default class SystemScene extends Phaser.Scene {
 
       // I to invade planet
       if (e.key.toLowerCase() === 'i') {
-        invadeSelectedObject();
+        this.handleInvasion();
         this.refresh();
         return;
       }
 
       // R to reinforce planet
       if (e.key.toLowerCase() === 'r') {
-        reinforceSelectedObject();
+        this.handleReinforcement();
         this.refresh();
         return;
       }
@@ -584,6 +605,158 @@ export default class SystemScene extends Phaser.Scene {
 
   // Legacy methods removed - selection now handled by core state
   // Use selectSystemObject() and getSelectedSystemObject() from GameState instead
+  
+  // -----------------------------------------------------------------------------
+  // Planet data synchronization
+  // -----------------------------------------------------------------------------
+  
+  private syncPlanetDataWithCore(): void {
+    const state = getState();
+    const systemId = state.selectedSystemId;
+    const system = systemId ? state.galaxy[systemId] : null;
+    
+    if (!system || !system.planets) return;
+    
+    // Sync visual planet objects with core planet data
+    for (const visualObj of this.systemObjects) {
+      if (visualObj.type === 'planet') {
+        const corePlanet = system.planets[visualObj.id];
+        if (corePlanet) {
+          // Sync with new defense system
+          visualObj.planetController = corePlanet.defense.control;
+          visualObj.planetTroops = corePlanet.defense.garrison;
+          visualObj.planetDefenses = corePlanet.defense.fortification;
+        }
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------------------
+  // Invasion and Reinforcement Handlers
+  // -----------------------------------------------------------------------------
+
+  private handleInvasion(): void {
+    const state = getState();
+    const selectedObject = getSelectedSystemObject();
+    
+    if (!selectedObject) {
+      return; // No object selected
+    }
+
+    // Parse object ID to extract type and actual ID
+    const parts = selectedObject.objectId.split(':');
+    const objectType = parts[1];
+    const actualObjectId = parts[2];
+
+    if (objectType !== 'planet') {
+      return; // Not a planet
+    }
+
+    // Check if planet can be invaded
+    const system = state.galaxy[selectedObject.systemId];
+    const planet = system?.planets?.[actualObjectId];
+    
+    if (!planet) {
+      return; // Planet not found
+    }
+
+    if (planet.defense.control === 'PLAYER') {
+      return; // Can't invade own planet
+    }
+
+    if (planet.invasion) {
+      return; // Already under invasion
+    }
+
+    // Find player combat fleet in system
+    const playerCombatFleet = Object.values(state.fleets).find(f => 
+      f.owner === 'PLAYER' && 
+      f.role === 'COMBAT' && 
+      f.location === selectedObject.systemId
+    );
+
+    if (!playerCombatFleet) {
+      return; // No combat fleet available
+    }
+
+    // Start invasion with default strength
+    const invasionStrength = 3;
+    const success = startInvasion(actualObjectId, invasionStrength, 'PLAYER');
+    
+    if (success) {
+      // Animate fleet to planet
+      this.animateFleetToAnchor(playerCombatFleet.id, `PLANET:${actualObjectId}`);
+      // Pulse planet marker
+      this.pulsePlanetMarker(actualObjectId);
+    }
+  }
+
+  private handleReinforcement(): void {
+    const state = getState();
+    const selectedObject = getSelectedSystemObject();
+    
+    if (!selectedObject) {
+      return; // No object selected
+    }
+
+    // Parse object ID to extract type and actual ID
+    const parts = selectedObject.objectId.split(':');
+    const objectType = parts[1];
+    const actualObjectId = parts[2];
+
+    if (objectType !== 'planet') {
+      return; // Not a planet
+    }
+
+    // Check if planet can be reinforced
+    const system = state.galaxy[selectedObject.systemId];
+    const planet = system?.planets?.[actualObjectId];
+    
+    if (!planet) {
+      return; // Planet not found
+    }
+
+    if (planet.defense.control !== 'PLAYER') {
+      return; // Can't reinforce enemy planet
+    }
+
+    if (planet.invasion) {
+      return; // Can't reinforce during invasion
+    }
+
+    // Check if player has troops available in system
+    const reinforcementCapacity = getReinforcementCapacity(selectedObject.systemId, 'PLAYER');
+    if (reinforcementCapacity <= 0) {
+      return; // No troops available
+    }
+
+    // Find player fleet in system
+    const playerFleet = Object.values(state.fleets).find(f => 
+      f.owner === 'PLAYER' && 
+      f.location === selectedObject.systemId
+    );
+
+    if (!playerFleet) {
+      return; // No fleet available
+    }
+
+    // Reinforce with default amount
+    const reinforcementAmount = Math.min(2, reinforcementCapacity);
+    const success = reinforcePlanetLegacy(actualObjectId, reinforcementAmount, 'PLAYER');
+    
+    if (success) {
+      // Animate fleet to planet
+      this.animateFleetToAnchor(playerFleet.id, `PLANET:${actualObjectId}`);
+      // Pulse planet marker
+      this.pulsePlanetMarker(actualObjectId);
+      // Show floating text
+      const planet = this.systemObjects.find(obj => obj.id === actualObjectId);
+      if (planet) {
+        const pos = this.hexToPixel(planet.coord.q, planet.coord.r, 400, 300);
+        this.showFloatingText(pos.x, pos.y - 20, `+${reinforcementAmount} GARRISON`, 0x49b36d);
+      }
+    }
+  }
 
   private showPlanetFeedback(obj: SystemObject, message: string, color: number): void {
     // Create temporary text feedback
@@ -736,12 +909,15 @@ export default class SystemScene extends Phaser.Scene {
     } else {
       this.selectedObjectId = null;
     }
+    
+    // Sync planet data between visual and core
+    this.syncPlanetDataWithCore();
 
     // System information
     const isBeingMined = isSystemBeingMined(systemId);
     const miningStatus = isBeingMined ? '⛏️ MINING' : '';
     const asteroidInfo = system.asteroids ? 
-      `Asteroids: ${system.asteroids.metalTier} (${system.asteroids.yieldRemaining.toFixed(1)}% remaining)` : 
+      `Asteroids: ${system.asteroids.metalTier} (${fmt(system.asteroids.yieldRemaining, 1)}% remaining)` : 
       'No asteroids';
     
     const stationInfo = system.station ? 
@@ -780,20 +956,41 @@ export default class SystemScene extends Phaser.Scene {
         
         if (selected.type === 'asteroid') {
           lines.push('Press M to mine asteroid');
-          if (system.asteroids && system.asteroids.yieldRemaining <= 0) {
+          if (system.asteroids && system.asteroids.yieldRemaining !== undefined && system.asteroids.yieldRemaining <= 0) {
             lines.push('⚠️ ASTEROID DEPLETED');
           }
         } else if (selected.type === 'planet') {
+          // Get core planet data for invasion status
+          const parts = selected.objectId.split(':');
+          const planetId = parts[2];
+          const corePlanet = system.planets?.[planetId];
+          
           lines.push(`Controller: ${selected.planetController}`);
           if (selected.planetTroops) {
-            lines.push(`Troops: ${selected.planetTroops} | Defenses: ${selected.planetDefenses || 0}`);
+            lines.push(`Garrison: ${fmt(selected.planetTroops)} | Fortification: ${fmt(selected.planetDefenses || 0)}`);
+            if (corePlanet?.defense && corePlanet.defense.unrest > 0) {
+              lines.push(`Unrest: ${fmt(corePlanet.defense.unrest)}`);
+            }
           }
-          if (selected.planetController === 'PLAYER') {
-            lines.push('Press R to reinforce troops');
-          } else if (selected.planetController === 'ENEMY' || selected.planetController === 'CONTESTED') {
-            lines.push('Press I to invade planet (requires combat fleet)');
+          
+          // Show invasion status
+          if (corePlanet?.invasion) {
+            const invasion = corePlanet.invasion;
+            lines.push(`⚔️ INVASION: Turn ${invasion.turnsOngoing} - ${invasion.attacker} STR ${invasion.invasionStrength}`);
           } else {
-            lines.push('Neutral planet - can be colonized');
+            // Show action buttons
+            if (selected.planetController === 'PLAYER') {
+              const capacity = getReinforcementCapacity(systemId, 'PLAYER');
+              if (capacity > 0) {
+                lines.push(`Press R to reinforce (+${Math.min(2, capacity)} troops available)`);
+              } else {
+                lines.push('No troops available for reinforcement');
+              }
+            } else if (selected.planetController === 'ENEMY') {
+              lines.push('Press I to invade planet');
+            } else if (selected.planetController === 'NEUTRAL') {
+              lines.push('Press I to colonize planet');
+            }
           }
         } else if (selected.type === 'station') {
           if (selected.stationState) {
@@ -823,10 +1020,180 @@ export default class SystemScene extends Phaser.Scene {
     // Redraw grid and selection layers
     this.drawHexGrid();
     this.drawSelection();
+    
+    // Refresh fleet sprites
+    this.refreshSystemFleets();
   }
 
   // Legacy mining method removed - now handled by mineSelectedObject() in core
   // Mining feedback is now handled by the core action system
+
+  // -----------------------------------------------------------------------------
+  // System Fleet Sprite Management
+  // -----------------------------------------------------------------------------
+
+  private refreshSystemFleets(): void {
+    const state = getState();
+    const systemId = state.selectedSystemId;
+    
+    if (!systemId) {
+      // Clear all fleet sprites if no system selected
+      for (const sprite of Object.values(this.systemFleetSprites)) {
+        sprite.destroy();
+      }
+      this.systemFleetSprites = {};
+      return;
+    }
+
+    const system = state.galaxy[systemId];
+    if (!system) return;
+
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+
+    // Get fleets in this system
+    const fleetsInSystem = Object.values(state.fleets).filter(f => f.location === systemId);
+
+    // Update or create fleet sprites
+    for (const fleet of fleetsInSystem) {
+      if (this.systemFleetSprites[fleet.id]) {
+        // Update existing sprite position based on anchor
+        this.updateFleetPosition(fleet.id, centerX, centerY);
+      } else {
+        // Create new sprite
+        const pos = this.getFleetPosition(fleet, centerX, centerY);
+        const sprite = createFleetIcon(
+          this,
+          pos.x,
+          pos.y,
+          fleet.owner,
+          fleet.role,
+          fleet.name
+        );
+        
+        this.systemFleetSprites[fleet.id] = sprite;
+      }
+    }
+
+    // Remove sprites for fleets no longer in system
+    for (const fleetId of Object.keys(this.systemFleetSprites)) {
+      if (!fleetsInSystem.find(f => f.id === fleetId)) {
+        this.systemFleetSprites[fleetId].destroy();
+        delete this.systemFleetSprites[fleetId];
+      }
+    }
+  }
+
+  private getFleetPosition(fleet: any, centerX: number, centerY: number): { x: number; y: number } {
+    // Default position: system center
+    let x = centerX;
+    let y = centerY;
+
+    // If fleet has an anchor, position near that object
+    if (fleet.systemAnchor) {
+      const parts = fleet.systemAnchor.split(':');
+      const anchorType = parts[0];
+      const anchorId = parts[1];
+
+      switch (anchorType) {
+        case 'STAR':
+          // Keep at center
+          break;
+        case 'PLANET':
+        case 'ASTEROID':
+        case 'STATION':
+          // Find the object and position near it
+          const obj = this.systemObjects.find(o => o.id === anchorId);
+          if (obj) {
+            const objPos = this.hexToPixel(obj.coord.q, obj.coord.r, centerX, centerY);
+            x = objPos.x + 15; // Offset to the right
+            y = objPos.y;
+          }
+          break;
+      }
+    }
+
+    return { x, y };
+  }
+
+  private updateFleetPosition(fleetId: string, centerX: number, centerY: number): void {
+    const sprite = this.systemFleetSprites[fleetId];
+    const state = getState();
+    const fleet = state.fleets[fleetId];
+    
+    if (!sprite || !fleet) return;
+    
+    const pos = this.getFleetPosition(fleet, centerX, centerY);
+    sprite.setPosition(pos.x, pos.y);
+  }
+
+  private animateFleetToAnchor(fleetId: string, targetAnchor: Fleet['systemAnchor']): void {
+    const sprite = this.systemFleetSprites[fleetId];
+    const state = getState();
+    const fleet = state.fleets[fleetId];
+    
+    if (!sprite || !fleet || !targetAnchor) return;
+    
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+    
+    // Set the anchor in core state
+    setFleetAnchor(fleetId, targetAnchor);
+    
+    // Calculate target position
+    const targetPos = this.getFleetPosition({ ...fleet, systemAnchor: targetAnchor }, centerX, centerY);
+    
+    // Animate to target
+    this.tweens.add({
+      targets: sprite,
+      x: targetPos.x,
+      y: targetPos.y,
+      duration: 400,
+      ease: 'Quad.easeInOut',
+      onComplete: () => {
+        sprite.setPosition(targetPos.x, targetPos.y);
+      }
+    });
+  }
+
+  private pulsePlanetMarker(planetId: string): void {
+    const planet = this.systemObjects.find(obj => obj.id === planetId && obj.type === 'planet');
+    if (!planet) return;
+
+    // Create a container for the planet marker to pulse
+    const container = this.add.container(planet.marker.x, planet.marker.y);
+    container.add(planet.marker);
+    
+    createPulseAnimation(this, container, 300, 1.2).then(() => {
+      // Remove container and restore marker
+      container.remove(planet.marker);
+      container.destroy();
+    });
+  }
+
+  private showFloatingText(x: number, y: number, text: string, color: number = 0xffffff): void {
+    const floatingText = this.add.text(x, y, text, {
+      font: '12px monospace',
+      color: `#${color.toString(16).padStart(6, '0')}`,
+      align: 'center'
+    }).setOrigin(0.5, 1);
+
+    // Animate floating up and fade
+    this.tweens.add({
+      targets: floatingText,
+      y: y - 30,
+      alpha: 0,
+      duration: 1500,
+      ease: 'Quad.easeOut',
+      onComplete: () => {
+        floatingText.destroy();
+      }
+    });
+  }
 
   private showMiningFeedback(obj: SystemObject, message: string, color: number): void {
     // Create temporary text feedback
@@ -863,6 +1230,12 @@ export default class SystemScene extends Phaser.Scene {
     }
     this.systemObjects = [];
     this.selectedObjectId = null;
+    
+    // Cleanup fleet sprites
+    for (const sprite of Object.values(this.systemFleetSprites)) {
+      sprite.destroy();
+    }
+    this.systemFleetSprites = {};
 
     this.scene.stop();
     this.scene.resume('GalaxyScene');

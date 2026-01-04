@@ -29,12 +29,14 @@ import {
   SystemIntel,
   StarSystem,
   PlanetController,
+  Planet,
   HexCoord,
   SystemObjectType,
   SystemObjectRef
 } from './types';
 
 import { hexDistance } from '../utils/hex';
+import { resolveInvasions } from './Invasion';
 
 const STORAGE_KEY = 'hexfleet_save_v1';
 
@@ -105,7 +107,7 @@ function addMetals(resources: GameState['resources'], tier: MetalTier, amount: n
   resources.tieredMetals[tier] += amount;
 }
 
-function pushIntel(kind: IntelEntry['kind'], text: string): void {
+export function pushIntel(kind: IntelEntry['kind'], text: string): void {
   state.intelLog.push({
     id: uid(),
     turn: state.turn,
@@ -511,6 +513,25 @@ export function selectSystemObject(systemId: string, objectId: string): void {
 
 export function getSelectedSystemObject(): { systemId: string; objectId: string } | null {
   return state.selectedSystemObject;
+}
+
+export function getSelectedPlanet(): { systemId: string; planetId: string; planet: Planet } | null {
+  const selection = state.selectedSystemObject;
+  if (!selection) return null;
+
+  const system = state.galaxy[selection.systemId];
+  if (!system || !system.planets) return null;
+
+  // Parse object ID to extract planet ID
+  const parts = selection.objectId.split(':');
+  if (parts.length !== 3 || parts[1] !== 'planet') return null;
+  
+  const planetId = parts[2];
+  const planet = system.planets[planetId];
+  
+  if (!planet) return null;
+  
+  return { systemId: selection.systemId, planetId, planet };
 }
 
 export function listSystemObjects(systemId: string): SystemObjectRef[] {
@@ -1142,15 +1163,18 @@ export function endTurn(): void {
   // 1) Mining happens at end of player phase
   applyMiningForPlayerTurn();
 
-  // 2) Switch to enemy phase
+  // 2) Resolve invasions (deterministic turn-based resolution)
+  resolveInvasions();
+
+  // 3) Switch to enemy phase
   state.phase = 'ENEMY';
   resetMovesFor('ENEMY');
   pushIntel('SYSTEM', `TURN ${state.turn}: Enemy phase begins.`);
 
-  // 3) Execute enemy turn
+  // 4) Execute enemy turn
   enemyPhaseStep();
 
-  // 4) Start next turn
+  // 5) Start next turn
   state.phase = 'PLAYER';
   state.turn++;
   resetMovesFor('PLAYER');
@@ -1259,7 +1283,14 @@ export function createPlanet(systemId: string, planetId: string, controller: Pla
     controller,
     groundTroops: controller === 'NEUTRAL' ? 0 : 50, // Neutral planets have no troops
     defenses: controller === 'NEUTRAL' ? 20 : 40, // Basic defenses
-    population: Math.floor(Math.random() * 10000) + 1000 // Random population
+    population: Math.floor(Math.random() * 10000) + 1000, // Random population
+    // NEW: Invasion system fields
+    defense: {
+      control: controller,
+      garrison: controller === 'NEUTRAL' ? 0 : 50,
+      fortification: controller === 'NEUTRAL' ? 20 : 40,
+      unrest: 0
+    }
   };
 }
 
@@ -1268,55 +1299,65 @@ export function invadePlanet(systemId: string, planetId: string, attackerFleetId
   const planet = system?.planets?.[planetId];
   const fleet = state.fleets[attackerFleetId];
 
-  if (!system || !planet || !fleet) return false;
-  if (fleet.location !== systemId) return false;
-  if (fleet.role !== 'COMBAT') return false;
+  if (!system || !planet || !fleet) {
+    pushIntel('ALERT', 'INVASION FAILED: Invalid target or fleet.');
+    return false;
+  }
+  if (fleet.location !== systemId) {
+    pushIntel('ALERT', 'INVASION FAILED: Fleet not in system.');
+    return false;
+  }
+  if (fleet.role !== 'COMBAT') {
+    pushIntel('ALERT', 'INVASION FAILED: Combat fleet required.');
+    return false;
+  }
 
   const attacker = fleet.owner;
   const defender = planet.controller;
 
   // Can't attack own planets
-  if (attacker === defender) return false;
+  if (attacker === defender) {
+    pushIntel('ALERT', 'INVASION FAILED: Cannot attack own planet.');
+    return false;
+  }
 
-  // Calculate battle strength
+  // Calculate battle strength (deterministic)
   const attackerStrength = calculateFleetStrength(fleet) + fleet.groundTroops;
   const defenderStrength = planet.defenses + planet.groundTroops;
 
-  // Battle resolution
-  const attackerRoll = Math.random() * attackerStrength;
-  const defenderRoll = Math.random() * defenderStrength;
-
-  const success = attackerRoll > defenderRoll;
+  // Deterministic battle resolution (no randomness)
+  // Attacker wins if they have significantly more strength
+  const success = attackerStrength > defenderStrength * 1.2; // 20% advantage required
 
   // Battle results
   if (success) {
-    // Attacker wins
-    const attackerLosses = Math.floor(Math.random() * 0.3 * fleet.groundTroops);
-    const defenderLosses = Math.floor(Math.random() * 0.8 * planet.groundTroops);
+    // Attacker wins - deterministic losses
+    const attackerLosses = Math.floor(fleet.groundTroops * 0.2); // 20% losses
+    const defenderLosses = planet.groundTroops; // All defenders eliminated
     
     fleet.groundTroops = Math.max(0, fleet.groundTroops - attackerLosses);
-    planet.groundTroops = Math.max(0, planet.groundTroops - defenderLosses);
+    planet.groundTroops = 0;
     planet.controller = attacker;
     planet.defenses = Math.max(0, planet.defenses - 20); // Reduce defenses
     
-    // Leave some troops to occupy
+    // Leave occupation troops
     const occupationTroops = Math.min(fleet.groundTroops, 30);
-    planet.groundTroops += occupationTroops;
     fleet.groundTroops -= occupationTroops;
-
-    pushIntel('SYSTEM', `PLANET CONQUERED: ${planetId} now controlled by ${attacker}!`);
-    return true;
+    planet.groundTroops = occupationTroops;
+    
+    pushIntel('ALERT', `PLANET CAPTURED: ${planetId} captured by ${attacker}. Losses: ${attackerLosses} troops.`);
   } else {
-    // Defender wins
-    const attackerLosses = Math.floor(Math.random() * 0.5 * fleet.groundTroops);
-    const defenderLosses = Math.floor(Math.random() * 0.2 * planet.groundTroops);
+    // Defender wins - deterministic losses
+    const attackerLosses = Math.floor(fleet.groundTroops * 0.4); // 40% losses
+    const defenderLosses = Math.floor(planet.groundTroops * 0.1); // 10% losses
     
     fleet.groundTroops = Math.max(0, fleet.groundTroops - attackerLosses);
     planet.groundTroops = Math.max(0, planet.groundTroops - defenderLosses);
-
-    pushIntel('SYSTEM', `INVASION FAILED: ${planetId} successfully defended!`);
-    return false;
+    
+    pushIntel('ALERT', `INVASION FAILED: ${planetId} defended. Attacker losses: ${attackerLosses} troops.`);
   }
+
+  return success;
 }
 
 function calculateFleetStrength(fleet: Fleet): number {
@@ -1330,9 +1371,22 @@ export function reinforcePlanet(systemId: string, planetId: string, fleetId: str
   const planet = system?.planets?.[planetId];
   const fleet = state.fleets[fleetId];
 
-  if (!system || !planet || !fleet) return false;
-  if (fleet.location !== systemId) return false;
-  if (fleet.owner !== planet.controller) return false;
+  if (!system || !planet || !fleet) {
+    pushIntel('ALERT', 'REINFORCEMENT FAILED: Invalid target or fleet.');
+    return false;
+  }
+  if (fleet.location !== systemId) {
+    pushIntel('ALERT', 'REINFORCEMENT FAILED: Fleet not in system.');
+    return false;
+  }
+  if (fleet.owner !== planet.controller) {
+    pushIntel('ALERT', 'REINFORCEMENT FAILED: Cannot reinforce enemy planet.');
+    return false;
+  }
+  if (fleet.groundTroops <= 0) {
+    pushIntel('ALERT', 'REINFORCEMENT FAILED: No troops available on fleet.');
+    return false;
+  }
 
   // Transfer troops from fleet to planet
   const transferTroops = Math.min(fleet.groundTroops, 20);
@@ -1433,4 +1487,20 @@ export function reinforceSelectedObject(): boolean {
   }
 
   return reinforcePlanet(selection.systemId, actualObjectId, playerFleet.id);
+}
+
+// -----------------------------------------------------------------------------
+// Fleet System Anchor (for presentation)
+// -----------------------------------------------------------------------------
+
+export function setFleetAnchor(fleetId: string, anchor: Fleet['systemAnchor']): void {
+  const fleet = state.fleets[fleetId];
+  if (!fleet) return;
+  
+  fleet.systemAnchor = anchor;
+}
+
+export function getFleetAnchor(fleetId: string): Fleet['systemAnchor'] {
+  const fleet = state.fleets[fleetId];
+  return fleet?.systemAnchor;
 }

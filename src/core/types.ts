@@ -65,11 +65,28 @@ export type Asteroids = {
 
 export type PlanetController = 'PLAYER' | 'ENEMY' | 'NEUTRAL' | 'CONTESTED';
 
+export type PlanetDefense = {
+  control: PlanetController;
+  garrison: number;
+  fortification: number;
+  unrest: number;
+};
+
+export type Invasion = {
+  planetId: string;
+  attacker: 'PLAYER' | 'ENEMY';
+  invasionStrength: number;
+  turnsOngoing: number;
+};
+
 export type Planet = {
   controller: PlanetController;
   groundTroops: number; // Troops stationed on planet
   defenses: number; // Planetary defense strength 0-100
   population: number; // Civilian population (for resource generation)
+  // NEW: Invasion system fields
+  defense: PlanetDefense;
+  invasion?: Invasion;
 };
 
 export type StarSystem = {
@@ -149,6 +166,9 @@ export type Fleet = {
 
   // Location is a systemId (NOT a coord)
   location: string;
+
+  // NEW: System-level anchor for presentation (serializable)
+  systemAnchor?: 'STAR' | `PLANET:${string}` | `ASTEROID:${string}` | `STATION:${string}`;
 
   // Turn movement points (determined by fleet composition)
   movesLeft: number;
