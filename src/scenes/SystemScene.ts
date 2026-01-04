@@ -65,6 +65,7 @@ export default class SystemScene extends Phaser.Scene {
   private selectionLayer!: Phaser.GameObjects.Graphics;
   private rangeLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for highlights
   private hoverLayer!: Phaser.GameObjects.Graphics; // NEW: dedicated layer for hover highlights
+  private highlightLayer!: Phaser.GameObjects.Graphics; // NEW: selection highlights
   private infoText!: Phaser.GameObjects.Text;
   private debugText!: Phaser.GameObjects.Text; // NEW: debug text for input verification
 
@@ -97,6 +98,9 @@ export default class SystemScene extends Phaser.Scene {
     selectedObjectId: '',
     selectedObjectType: '',
     selectedFleetId: '',
+    pickedObjectId: '',
+    pickedObjectType: '',
+    pickedObjectName: '',
     lastAction: '',
     lastResult: '',
     isAnimating: false,
@@ -132,6 +136,7 @@ export default class SystemScene extends Phaser.Scene {
     this.selectionLayer = this.add.graphics();
     this.rangeLayer = this.add.graphics(); // NEW: range layer for highlights
     this.hoverLayer = this.add.graphics(); // NEW: hover layer for highlights
+    this.highlightLayer = this.add.graphics(); // NEW: selection highlight layer
 
     // NOTE: This doesn't truly clip rendering, but keeps your existing behavior.
     // If you want real clipping later, we can add a geometry mask.
@@ -157,6 +162,27 @@ export default class SystemScene extends Phaser.Scene {
       backgroundColor: '#000000',
       padding: { x: 8, y: 8 }
     }).setScrollFactor(0).setDepth(1000);
+
+    // NEW: Click-catcher UI layer - ensures pointer events always captured
+    const clickCatcher = this.add.graphics()
+      .fillRect(0, 0, this.cameras.main.width, this.cameras.main.height)
+      .setInteractive()
+      .setScrollFactor(0)
+      .setDepth(999); // Just below debug overlay
+    
+    clickCatcher.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      // Convert to world coordinates and route to existing handler
+      const worldPos = p.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
+      this.onSystemPointerDown(worldPos.x, worldPos.y);
+    });
+
+    clickCatcher.on('pointermove', (p: Phaser.Input.Pointer) => {
+      // Update debug info on hover
+      this.debugState.pointerScreen = { x: p.x, y: p.y };
+      const worldPos = p.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
+      this.debugState.pointerWorld = { x: worldPos.x, y: worldPos.y };
+      this.updateDiagnostics();
+    });
 
     // Generate system contents
     this.generateSystemContents();
@@ -187,28 +213,35 @@ export default class SystemScene extends Phaser.Scene {
     this.debugState.selectedObjectId = this.selectedObjectId || 'none';
     this.debugState.selectedFleetId = state.selectedFleetId || 'none';
     
-    if (this.selectedObjectId) {
-      const selected = this.systemObjects.find(obj => obj.id === this.selectedObjectId);
-      this.debugState.selectedObjectType = selected ? selected.type : 'unknown';
+    // NEW: Update picked object info
+    const pickedObject = this.debugState.pointerWorld.x !== 0 || this.debugState.pointerWorld.y !== 0 
+      ? this.pickSystemObjectAt(this.debugState.pointerWorld.x, this.debugState.pointerWorld.y)
+      : null;
+    
+    if (pickedObject) {
+      this.debugState.pickedObjectId = pickedObject.id;
+      this.debugState.pickedObjectType = pickedObject.type;
+      this.debugState.pickedObjectName = pickedObject.name;
     } else {
-      this.debugState.selectedObjectType = 'none';
+      this.debugState.pickedObjectId = 'none';
+      this.debugState.pickedObjectType = 'none';
+      this.debugState.pickedObjectName = 'none';
     }
     
-    // Update overlay text
+    // Update overlay text with all required fields
     const overlayText = [
-      `=== SYSTEMSCENE DIAGNOSTICS ===`,
+      `=== SYSTEMSCENE DEBUG HUD ===`,
+      `Screen Coords: (${this.debugState.pointerScreen.x.toFixed(0)}, ${this.debugState.pointerScreen.y.toFixed(0)})`,
+      `World Coords: (${this.debugState.pointerWorld.x.toFixed(0)}, ${this.debugState.pointerWorld.y.toFixed(0)})`,
+      `Picked Object: ${this.debugState.pickedObjectName} (${this.debugState.pickedObjectType}) [${this.debugState.pickedObjectId}]`,
+      `Selected Fleet: ${this.debugState.selectedFleetId}`,
+      `Last Action: ${this.debugState.lastAction}`,
+      `Last Result: ${this.debugState.lastResult}`,
       `Active Scenes: ${this.debugState.activeScenes.join(', ')}`,
       `SystemScene Topmost: ${this.debugState.systemSceneTopmost}`,
       `GalaxyScene Paused: ${this.debugState.galaxyScenePaused}`,
       `Input Enabled: ${this.debugState.inputEnabled}`,
       `Is Animating: ${this.debugState.isAnimating}`,
-      `Pointer Screen: (${this.debugState.pointerScreen.x}, ${this.debugState.pointerScreen.y})`,
-      `Pointer World: (${this.debugState.pointerWorld.x.toFixed(0)}, ${this.debugState.pointerWorld.y.toFixed(0)})`,
-      `Picked Hex: (${this.debugState.pickedHex.q}, ${this.debugState.pickedHex.r})`,
-      `Selected Object: ${this.debugState.selectedObjectId} (${this.debugState.selectedObjectType})`,
-      `Selected Fleet: ${this.debugState.selectedFleetId}`,
-      `Last Action: ${this.debugState.lastAction}`,
-      `Last Result: ${this.debugState.lastResult}`,
       `===============================`
     ];
     
@@ -606,6 +639,81 @@ export default class SystemScene extends Phaser.Scene {
   }
 
   // ---------------------------------------------------------------------------
+  // NEW: Visual feedback methods
+  // ---------------------------------------------------------------------------
+  
+  private refreshHighlights(): void {
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+
+    // Clear highlight layers
+    this.highlightLayer.clear();
+    this.hoverLayer.clear();
+    this.selectionLayer.clear();
+
+    // Draw hover highlight
+    if (this.hoveredObjectId) {
+      const hoveredObj = this.systemObjects.find(obj => obj.objectId === this.hoveredObjectId);
+      if (hoveredObj) {
+        const pos = this.hexToPixel(hoveredObj.coord.q, hoveredObj.coord.r, centerX, centerY);
+        this.hoverLayer
+          .lineStyle(2, 0xffff00, 0.7)
+          .strokeCircle(pos.x, pos.y, this.HEX_SIZE * 1.1);
+      }
+    }
+
+    // Draw selection highlight (from core state)
+    const selectedObject = getSelectedSystemObject();
+    if (selectedObject && selectedObject.systemId === getState().selectedSystemId) {
+      const selectedObj = this.systemObjects.find(obj => obj.objectId === selectedObject.objectId);
+      if (selectedObj) {
+        const pos = this.hexToPixel(selectedObj.coord.q, selectedObj.coord.r, centerX, centerY);
+        
+        // Draw selection ring
+        this.selectionLayer
+          .lineStyle(3, 0x00ff00, 1)
+          .strokeCircle(pos.x, pos.y, this.HEX_SIZE * 1.2);
+          
+        // Draw pulsing effect
+        this.highlightLayer
+          .lineStyle(2, 0x00ff00, 0.5)
+          .strokeCircle(pos.x, pos.y, this.HEX_SIZE * 1.5);
+      }
+    }
+  }
+  
+  private pulseAsteroid(asteroidId: string): void {
+    const asteroid = this.systemObjects.find(obj => obj.id === asteroidId && obj.type === 'asteroid');
+    if (!asteroid) return;
+    
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+    const pos = this.hexToPixel(asteroid.coord.q, asteroid.coord.r, centerX, centerY);
+    
+    // Create pulse effect
+    const pulse = this.add.graphics()
+      .lineStyle(4, 0xffaa00, 1)
+      .strokeCircle(pos.x, pos.y, this.HEX_SIZE * 0.6);
+    
+    // Animate pulse
+    this.tweens.add({
+      targets: pulse,
+      scaleX: 2,
+      scaleY: 2,
+      alpha: 0,
+      duration: 600,
+      ease: 'Sine.easeOut',
+      onComplete: () => {
+        pulse.destroy();
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Movement handling with core integration
   // ---------------------------------------------------------------------------
 
@@ -772,6 +880,35 @@ export default class SystemScene extends Phaser.Scene {
     this.handleHexClick(hex.q, hex.r, worldX, worldY, centerX, centerY);
   }
 
+  // ---------------------------------------------------------------------------
+  // NEW: Robust object picking (camera-safe)
+  // ---------------------------------------------------------------------------
+  
+  private pickSystemObjectAt(worldX: number, worldY: number): SystemObject | null {
+    const viewX = (this.cameras.main.width - 800) / 2;
+    const viewY = (this.cameras.main.height - 600) / 2;
+    const centerX = viewX + 400;
+    const centerY = viewY + 300;
+    
+    let best: SystemObject | null = null;
+    let bestDist = Infinity;
+    
+    for (const obj of this.systemObjects) {
+      const objPos = this.hexToPixel(obj.coord.q, obj.coord.r, centerX, centerY);
+      const dx = worldX - objPos.x;
+      const dy = worldY - objPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      // Use larger pick radius for easier selection
+      if (dist < this.PICK_RADIUS * 2 && dist < bestDist) {
+        best = obj;
+        bestDist = dist;
+      }
+    }
+    
+    return best;
+  }
+
   private findObjectAtHex(q: number, r: number): SystemObject | null {
     const viewX = (this.cameras.main.width - 800) / 2;
     const viewY = (this.cameras.main.height - 600) / 2;
@@ -816,14 +953,34 @@ export default class SystemScene extends Phaser.Scene {
       return;
     }
 
-    // Try to find object at hex
-    const clickedObject = this.findObjectAtHex(q, r);
+    // NEW: Use robust picking first
+    const clickedObject = this.pickSystemObjectAt(worldX, worldY);
     
     if (clickedObject) {
       console.log('[SystemScene] found object:', clickedObject);
       this.debugState.lastAction = 'SELECT_OBJECT';
-      this.debugState.lastResult = `OK: Selected ${clickedObject.type} "${clickedObject.id}"`;
+      this.debugState.lastResult = `OK: Selected ${clickedObject.type} "${clickedObject.name}"`;
       this.selectedObjectId = clickedObject.id;
+      
+      // NEW: Check for mining interaction
+      if (clickedObject.type === 'asteroid') {
+        const selectedFleetId = this.selectedObjectId;
+        if (selectedFleetId) {
+          const selectedFleet = state.fleets[selectedFleetId];
+          if (selectedFleet && selectedFleet.location === systemId && selectedFleet.role === 'MINER') {
+            console.log('[SystemScene] attempting mining on asteroid:', clickedObject.name);
+            this.debugState.lastAction = 'MINING_ATTEMPT';
+            
+            // Use existing mining method
+            this.tryMineSelected();
+            this.updateDiagnostics();
+            return;
+          }
+        }
+      }
+      
+      // Regular object selection
+      selectSystemObject(systemId, clickedObject.objectId);
       this.refresh();
       this.updateDiagnostics();
       return;
@@ -1179,39 +1336,6 @@ export default class SystemScene extends Phaser.Scene {
 
         const pos = this.hexToPixel(q, r, centerX, centerY);
         this.drawHexOutline(this.gridLayer, pos.x, pos.y, this.HEX_SIZE, borderColor, 1);
-      }
-    }
-  }
-
-  // NEW: Dedicated method for hover and selection highlights
-  private refreshHighlights(): void {
-    const viewX = (this.cameras.main.width - 800) / 2;
-    const viewY = (this.cameras.main.height - 600) / 2;
-    const centerX = viewX + 400;
-    const centerY = viewY + 300;
-
-    // Clear highlight layers
-    this.hoverLayer.clear();
-    this.selectionLayer.clear();
-
-    // Draw hover highlight
-    if (this.hoveredObjectId) {
-      const hoveredObj = this.systemObjects.find(obj => obj.objectId === this.hoveredObjectId);
-      if (hoveredObj) {
-        const pos = this.hexToPixel(hoveredObj.coord.q, hoveredObj.coord.r, centerX, centerY);
-        const hoverStyle = getHighlightStyle('hover');
-        this.drawHexOutline(this.hoverLayer, pos.x, pos.y, this.HEX_SIZE + 2, hoverStyle.stroke, hoverStyle.width);
-      }
-    }
-
-    // Draw selection highlight (from core state)
-    const selectedObject = getSelectedSystemObject();
-    if (selectedObject && selectedObject.systemId === getState().selectedSystemId) {
-      const selectedObj = this.systemObjects.find(obj => obj.objectId === selectedObject.objectId);
-      if (selectedObj) {
-        const pos = this.hexToPixel(selectedObj.coord.q, selectedObj.coord.r, centerX, centerY);
-        const selectedStyle = getHighlightStyle('selected');
-        this.drawHexOutline(this.selectionLayer, pos.x, pos.y, this.HEX_SIZE + 3, selectedStyle.stroke, selectedStyle.width);
       }
     }
   }
@@ -1623,25 +1747,29 @@ export default class SystemScene extends Phaser.Scene {
       return;
     }
 
-    if (!this.selectedObjectId) {
-      this.debugText.setText('DEBUG: No object selected for mining');
+    const selectedObject = getSelectedSystemObject();
+    if (!selectedObject || selectedObject.systemId !== systemId) {
+      this.debugText.setText('DEBUG: No object selected');
       return;
     }
 
-    const selected = this.systemObjects.find(obj => obj.id === this.selectedObjectId);
-    if (!selected) {
-      this.debugText.setText('DEBUG: Selected object not found');
+    // Find the visual object
+    const selected = this.systemObjects.find(obj => obj.objectId === selectedObject.objectId);
+    if (!selected || selected.type !== 'asteroid') {
+      this.debugText.setText('DEBUG: Selected object is not an asteroid');
       return;
     }
 
-    if (selected.type !== 'asteroid') {
-      this.debugText.setText(`DEBUG: Cannot mine ${selected.type}, only asteroids`);
-      return;
-    }
+    // Check if player has miner at this system
+    const miner = Object.values(state.fleets).find(f => 
+      f.owner === 'PLAYER' && 
+      f.role === 'MINER' && 
+      f.location === systemId
+    );
 
-    // Check if already being mined
-    if (isSystemBeingMined(systemId)) {
-      this.debugText.setText('DEBUG: System already being mined this turn');
+    if (!miner) {
+      this.debugText.setText('DEBUG: No miner fleet at this system');
+      this.infoText.setText('MINING FAILED: No miner fleet at this system');
       return;
     }
 
@@ -1650,18 +1778,15 @@ export default class SystemScene extends Phaser.Scene {
     
     if (success) {
       this.debugText.setText('DEBUG: Mining successful!');
-      this.showMiningFeedback(selected, 'MINING!', 0x44ff44);
+      this.infoText.setText(`MINING: ${miner.name} mined ${selected.name}`);
+      this.debugState.lastResult = `SUCCESS: Mined ${selected.name}`;
       
-      // Update asteroid appearance
-      if (selected.marker) {
-        selected.marker.setFillStyle(0x666666, 1);
-      }
-      if (selected.icon) {
-        selected.icon.setText('💀');
-      }
+      // Add visual pulse effect
+      this.pulseAsteroid(selected.id);
     } else {
       this.debugText.setText('DEBUG: Mining failed');
-      this.showMiningFeedback(selected, 'MINING FAILED', 0xff4444);
+      this.infoText.setText('MINING FAILED: Cannot mine this asteroid');
+      this.debugState.lastResult = 'FAILED: Mining failed';
     }
 
     this.refresh();
