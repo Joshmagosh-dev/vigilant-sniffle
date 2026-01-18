@@ -230,22 +230,55 @@ All authoritative transitions live in `src/core/GameState.ts`.
 
 ## 6.2 Turn economy
 
-- **Moves per turn**: `MOVES_PER_TURN = 2` (constant in `GameState.ts`).
-- **Reset**: at end of `endTurn()`, all player fleets get `movesLeft = maxMoves = MOVES_PER_TURN`.
+### Turn Parameters
+- **Moves per turn**: `MOVES_PER_TURN = 2` (constant in `GameState.ts`)
+- **Turn reset**: At end of `endTurn()`, all player fleets get `movesLeft = maxMoves = MOVES_PER_TURN`
+- **Phase structure**: PLAYER → ENEMY → TURN_INCREMENT → PLAYER
+- **Turn limit**: Optional, default unlimited
+
+### Movement Rules
+- **Adjacent only**: `hexDistance(from, to) === 1`
+- **Cost**: 1 move point per hex
+- **Diagonal movement**: Supported via axial coordinate system
+- **Enemy movement**: Same rules as player (adjacent only)
 
 ## 6.3 Mining
 
 Mining is executed at the end of the player phase (`applyMiningForPlayerTurn()` called inside `endTurn()`).
 
-- **Eligibility**
-  - `fleet.owner === 'PLAYER'`
-  - `fleet.role === 'MINER'`
-  - `system.asteroids` exists
+### Eligibility
+- `fleet.owner === 'PLAYER'`
+- `fleet.role === 'MINER'`
+- `system.asteroids` exists
 
-- **Yield**
-  - `base = MINER_YIELD_PER_TURN[fleet.miningTier]`
-  - `gained = floor(base * system.asteroids.richness)`
-  - Added to **the asteroid’s** `metalTier` (not the fleet’s tier).
+### Yield Calculation
+```ts
+// Base yield per mining tier
+const MINER_YIELD_PER_TURN = {
+  T1: 10,  // Base metals per turn
+  T2: 25,
+  T3: 50
+};
+
+// System richness multiplier
+const RICHNESS_MULTIPLIER = {
+  POOR: 0.5,
+  NORMAL: 1.0,
+  RICH: 1.5,
+  ABUNDANT: 2.0
+};
+
+// Final calculation
+base = MINER_YIELD_PER_TURN[fleet.miningTier];
+multiplier = RICHNESS_MULTIPLIER[system.asteroids.richness];
+gained = Math.floor(base * multiplier);
+```
+
+### Mining Parameters
+- **Moves per turn**: `MOVES_PER_TURN = 2`
+- **Mining requires**: Fleet must be stationary for the turn
+- **Yield cap**: Maximum 100 metals per fleet per turn
+- **Resource type**: Mined into the asteroid's `metalTier`
 
 ## 6.4 Enemy step (current)
 
@@ -255,30 +288,85 @@ Mining is executed at the end of the player phase (`applyMiningForPlayerTurn()` 
 
 ---
 
-# 7. Deterministic RNG and Procedural Generation Plan
+# 7. Deterministic Roguelite Design
 
-The GDD locks “Deterministic RNG (seeded)”. The current codebase uses hardcoded galaxy seeds and uses `Math.random()` only for `uid()` generation.
+## 7.1 Design Philosophy
 
-## 7.1 Target deterministic requirements
+HexFleet combines **deterministic mechanics** with **roguelite consequences**:
 
-- Same **run seed** should generate the same galaxy layout and same per-system rolls.
-- Game outcomes should be reproducible given:
-  - run seed
-  - action history
-  - same code version (or a compatible migration).
+- **Deterministic**: Same inputs always produce same outputs
+- **Roguelite**: Permanent loss and meaningful consequences
+- **Player Agency**: Skill and decision-making over random chance
 
-## 7.2 Design approach
+## 7.2 Deterministic Systems
 
-- Add `runSeed` to `GameState` (future `version: 2` migration).
-- Implement a tiny RNG (example: Mulberry32 / Xorshift32) as a pure function in `src/core/rng.ts`.
-- Never call `Math.random()` for gameplay.
-- Prefer **seed derivation** rather than consuming a global stream:
-  - `systemSeed = hash(runSeed, system.id)`
-  - `encounterSeed = hash(systemSeed, turn, fleet.id, actionCounter)`
+### Seeded Galaxy Generation
+- Same `runSeed` generates identical galaxy layout
+- System types, resources, and threats are reproducible
+- Enables shared seeds and challenge runs
 
-This makes outcomes stable and avoids “RNG drift” when code changes reorder random calls.
+### Combat Resolution
+- Power calculations are transparent mathematical formulas
+- No random damage rolls or critical hits
+- Outcomes determined by fleet composition and preparation
 
-## 7.3 Procedural galaxy generation (Phase 1+)
+### Resource Generation
+- Mining yields follow fixed formulas
+- No random resource drops or bonuses
+- Predictable economic planning possible
+
+## 7.3 Roguelite Elements
+
+### Permanent Consequences
+- **Fleet Destruction**: Lost forever, no recovery
+- **Resource Scarcity**: Limited recovery from setbacks
+- **Intel Gaps**: Players work with incomplete information
+
+### Strategic Depth
+- **Meaningful Choices**: Every decision has lasting impact
+- **Risk vs Reward**: Deeper systems offer better rewards but higher danger
+- **No Undo**: Actions cannot be taken back (except save/load)
+
+### Run Structure
+- **Session-based**: Each game is a complete run
+- **Progress Reset**: Start fresh each new game
+- **Meta Progression**: Future: unlock persistent bonuses
+
+## 7.4 Balancing Determinism and Fun
+
+### Information Asymmetry
+- Players never have perfect information
+- Scanning reveals intel gradually
+- Enemy compositions hidden until engagement
+
+### Preparation Matters
+- Time to scout and plan approaches
+- Fleet composition affects outcomes
+- Resource management crucial
+
+### Recovery Mechanics
+- Dismantling ships for resources
+- Salvage from combat victories
+- Strategic retreat options
+
+## 7.5 Technical Implementation
+
+### RNG Usage
+- **Prohibited**: `Math.random()` for gameplay
+- **Required**: Seeded deterministic functions
+- **Allowed**: `uid()` generation for unique IDs
+
+### Save System
+- **Ironman Mode**: Optional autosave each turn
+- **Save Scumming**: Discouraged but possible
+- **Checksums**: Detect tampering in competitive modes
+
+### Reproducibility
+- Same seed + same actions = same outcome
+- Enables speedrun competition and shared challenges
+- Debug mode with seed display
+
+## 7.6 Procedural Galaxy Generation (Phase 1+)
 
 Replace `seedGalaxy()` with a deterministic generator:
 
@@ -293,6 +381,19 @@ Replace `seedGalaxy()` with a deterministic generator:
   - Assign `StarSystemType` and `asteroids` via weighted tables by tier.
 - Storage:
   - Generated galaxy is stored in save and becomes authoritative; do not regenerate on load.
+
+### Implementation Details
+```ts
+// Weighted system type distribution by tier
+const SYSTEM_TYPE_WEIGHTS = {
+  1: { EMPTY_SPACE: 60, MINING_SYSTEM: 30, DERELICT: 10 },
+  2: { EMPTY_SPACE: 40, MINING_SYSTEM: 35, DERELICT: 20, HOSTILE_STRONGHOLD: 5 },
+  3: { EMPTY_SPACE: 20, MINING_SYSTEM: 25, DERELICT: 25, HOSTILE_STRONGHOLD: 25, ABYSS_ZONE: 5 }
+};
+
+// Asteroid richness distribution
+const ASTEROID_RICHNESS = { POOR: 0.3, NORMAL: 0.5, RICH: 0.15, ABUNDANT: 0.05 };
+```
 
 ---
 
@@ -340,9 +441,55 @@ The GDD specifies “no tactical battle screen (Phase 1)”. We will implement a
 
 ## 9.3 Implementation sketch
 
+### Combat Power Calculation
+```ts
+// Fleet power calculation
+function calculateFleetPower(fleet: Fleet): number {
+  let power = 0;
+  for (const ship of fleet.ships) {
+    const shipPower = 
+      (ship.weapons || 0) * 1.0 +
+      (ship.armor || 0) * 0.5 +
+      ship.integrity * 0.1 +
+      ship.morale * 0.05;
+    power += shipPower;
+  }
+  return power * (fleet.morale / 100); // Fleet morale modifier
+}
+
+// System threat calculation
+function calculateSystemThreat(system: StarSystem): number {
+  const baseThreat = system.tier * 20;
+  const typeModifier = {
+    'EMPTY_SPACE': 0,
+    'MINING_SYSTEM': 5,
+    'DERELICT': 15,
+    'HOSTILE_STRONGHOLD': 50,
+    'ABYSS_ZONE': 100
+  }[system.type];
+  return baseThreat + typeModifier;
+}
+```
+
+### Combat Resolution
+```ts
+function resolveCombat(fleetId: string, systemId: string): CombatOutcome {
+  const fleetPower = calculateFleetPower(fleet);
+  const systemThreat = calculateSystemThreat(system);
+  const powerRatio = fleetPower / systemThreat;
+  
+  // Determine outcome based on power ratio
+  if (powerRatio >= 2.0) return 'VICTORY';
+  if (powerRatio >= 1.2) return 'PYRRHIC_VICTORY';
+  if (powerRatio >= 0.8) return 'RETREAT';
+  return 'DESTRUCTION';
+}
+```
+
 - Add `resolveCombat(fleetId, systemId, intent)` to `GameState`.
 - Keep all arithmetic in `core`.
 - Emit intel lines that narrate the result.
+- Apply damage based on outcome type.
 
 ---
 
@@ -473,9 +620,59 @@ Goal: gameplay logic correctness without Phaser.
 
 # 15. Open Design/Tech Decisions
 
-- How to represent “multiple ships per fleet” while keeping UI simple.
-  - Option A: `Fleet.ships: Ship[]` (as in the GDD)
-  - Option B: keep single `shipType` per fleet in Phase 1 and migrate later
-- Save scumming prevention strategy for web builds.
-  - Options: ironman autosave each turn, checksum, or daily-run seeds.
-- Intel uncertainty representation (ranges, confidence, or hidden modifiers).
+## 15.1 Fleet Composition Strategy
+
+**Decision**: Multi-ship fleets from Phase 1
+- `Fleet.ships: Ship[]` array (as in GDD)
+- Single shipType maintained for backward compatibility
+- Migration path: derive `shipType` from primary ship in fleet
+- UI simplification: Show fleet role glyph based on composition
+
+## 15.2 Save Scumming Prevention
+
+**Decision**: Multiple options for different player types
+- **Casual**: Normal save/load allowed
+- **Ironman**: Autosave each turn, single save slot
+- **Challenge**: Seed-based runs with checksum validation
+- **Speedrun**: Built-in timer and validation system
+
+## 15.3 Intel Uncertainty Representation
+
+**Decision**: Progressive revelation system
+- **Phase 1**: Binary UNKNOWN/SCANNED states
+- **Phase 2**: Add confidence levels (0-100%)
+- **Phase 3**: Range-based estimates ("5-10 enemies")
+- Keep core deterministic - uncertainty from incomplete data, not random rolls
+
+## 15.4 Performance Optimization Priorities
+
+**Current**: Small galaxy, no optimization needed
+**Phase 2**: 
+- Spatial hashing for system lookup (>100 systems)
+- Cached rendering for static elements
+- Lazy loading for intel data
+**Phase 3**:
+- Level-of-detail rendering for zoom levels
+- Background processing for enemy AI
+
+## 15.5 Testing Strategy Expansion
+
+**Unit Tests** (Phase 1):
+- Core gameplay logic
+- Hex math utilities
+- State transitions
+
+**Integration Tests** (Phase 2):
+- Save/load migration
+- Combat resolution
+- Mining calculations
+
+**Determinism Tests** (Phase 2+):
+- Seed reproducibility
+- Action sequence consistency
+- Version compatibility
+
+**Performance Tests** (Phase 3):
+- Large galaxy generation
+- Memory usage profiling
+- Turn processing benchmarks
