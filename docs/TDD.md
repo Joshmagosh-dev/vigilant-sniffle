@@ -2,8 +2,8 @@
 
 **Locked stack:** Phaser 3 (Phaser JS) + TypeScript
 
-Version: 0.1 (Foundation)
-Last updated: 2025-12-27
+Version: 0.3 (Clicker RTS Implementation)
+Last updated: 2025-01-19
 
 ---
 
@@ -26,15 +26,17 @@ This doc is intentionally biased toward:
 - **Pure GameState layer**
   - All game rules live in `src/core/*` and can run without Phaser.
   - Phaser scenes render state and call GameState actions.
-- **Turn-based on a hex galaxy map**
-  - Axial coordinates `(q,r)`.
-  - Adjacent movement costs 1 MP.
-  - Player phase then enemy phase.
+- **Real-time tick-based simulation**
+  - Fixed tick rate: 10 ticks per second (configurable)
+  - Deterministic outcomes: Same seed + same actions = same results
+  - Event-driven: Player inputs timestamped to specific ticks
+  - Pause/Resume: Space bar pauses simulation
 - **Fog / Intel-first play**
   - Systems start `UNKNOWN`, become `SCANNED` via exploration/scanning.
-- **Resource loop (Phase 1 foundation)**
-  - Mining yields tiered metals per turn for miner fleets.
+- **Real-time resource loop (Clicker core)**
+  - Mining yields tiered metals continuously per second for miner fleets.
   - Building new fleets consumes tiered metals.
+  - Click boosts provide temporary efficiency multipliers.
 - **Persistence**
   - Save/load via `localStorage` with versioning.
 
@@ -140,9 +142,11 @@ All types below are defined in `src/core/types.ts`.
   - Composition: `ships: Ship[]` (authoritative ship array)
   - Legacy compatibility: `role: FleetRole`, `shipType: ShipType` (derived from ships)
   - Position: `location: string` (system id)
-  - Turn economy: `movesLeft`, `maxMoves`
+  - Real-time task: `task: 'IDLE' | 'MOVE' | 'MINE' | 'SCAN' | 'SALVAGE' | 'SUPPRESS'`
+  - Task completion: `eta: number` (ticks remaining, 0 = complete)
   - Status: `integrity` (0..100), `morale` (0..100) (aggregated from ships)
   - Mining: `miningTier?: MetalTier` (derived from best miner ship)
+  - Boosts: `activeBoosts: Boost[]` (temporary effects with cooldowns)
 
 ## 5.4 Resources
 
@@ -150,31 +154,62 @@ All types below are defined in `src/core/types.ts`.
   - `tieredMetals: { T1; T2; T3 }`
   - `alloys`, `gas`, `crystals` (reserved for later loops)
 
-## 5.5 Intel log
+## 5.5 Boost System (NEW)
+
+- **`BoostType`**
+  - `'OVERCLOCK'`: 2× mining yield for 6 seconds (30s cooldown)
+  - `'FOCUS'`: 3× scan speed for 8 seconds (45s cooldown)
+  - `'BRACE'`: 50% pressure damage reduction for 10 seconds (60s cooldown)
+
+- **`Boost`**
+  - `type: BoostType`
+  - `duration: number` (ticks remaining)
+  - `cooldown: number` (ticks until reusable)
+  - `fleetId: string` (which fleet has this boost)
+
+## 5.6 Pressure System (NEW)
+
+- **`SystemPressure`**
+  - `current: number` (0..100, current pressure level)
+  - `max: number` (system pressure capacity)
+  - `rate: number` (pressure change per tick when player present)
+  - `suppression: number` (pressure reduction per tick from combat ships)
+
+- **`PressureThreshold`**
+  - `SAFE: 30` (no damage)
+  - `WARNING: 60` (minor integrity damage)
+  - `CRITICAL: 85` (major damage + retreat window closing)
+  - `COLLAPSE: 100` (fleet destruction)
+
+## 5.7 Intel log
 
 - **`IntelEntry`**
   - `id`, `turn`, `ts`
   - `kind: 'MOVE' | 'SCAN' | 'MINE' | 'BUILD' | 'DISMANTLE' | 'ALERT' | 'SYSTEM'` (UPDATED: added DISMANTLE)
   - `text` (human readable)
 
-## 5.6 Game state root
+## 5.8 Game state root
 
 - **`GameState`**
   - `version: 1`
-  - `turn: number`
-  - `phase: 'PLAYER' | 'ENEMY'`
+  - `tick: number` (current simulation tick)
+  - `paused: boolean` (simulation state)
   - `galaxy: Galaxy`
   - `fleets: Record<string, Fleet>`
   - `selectedSystemId: string | null`
   - `selectedFleetId: string | null`
   - `resources: Resources`
   - `intelLog: IntelEntry[]`
+  - `systemPressures: Record<string, SystemPressure>` (pressure state per system)
+  - `activeBoosts: Record<string, Boost>` (global boost registry)
 
 ### Invariants
 
 - `Fleet.location` must always reference a valid `StarSystem.id`.
-- `movesLeft` is clamped by usage (must never go negative by rule).
+- `Fleet.eta` is clamped to 0..max and decrements each tick during task execution.
 - `integrity` and `morale` are 0..100 (future: clamp in mutation helpers).
+- `Boost.duration` and `Boost.cooldown` are clamped to 0..max and decrement each tick.
+- `SystemPressure.current` is clamped to 0..max and changes based on fleet presence/actions.
 - `GameState` must remain JSON-serializable.
 
 ---
@@ -183,8 +218,48 @@ All types below are defined in `src/core/types.ts`.
 
 All authoritative transitions live in `src/core/GameState.ts`.
 
-## 6.1 Public action API (current)
+## 6.1 Real-Time Simulation API
 
+### Core Simulation Loop
+- **`tickSimulation()`**
+  - Processes one simulation tick (1/10 second at default rate)
+  - Updates all fleet ETAs, boosts, and pressure systems
+  - Applies continuous mining and pressure effects
+  - Called by Phaser scene update loop
+
+- **`togglePause()`**
+  - Toggles simulation paused state
+  - Space bar triggers this action
+
+- **`isPaused(): boolean`**
+  - Returns current simulation state
+
+### Fleet Task Management
+- **`assignFleetTask(fleetId, task, targetId?): boolean`**
+  - Guardrails:
+    - fleet must be player-owned
+    - fleet must be IDLE or task-interruptable
+    - target must be valid for task type
+  - Effects:
+    - Sets `fleet.task = task`
+    - Calculates and sets `fleet.eta` based on task type
+    - Emits intel entry
+
+- **`cancelFleetTask(fleetId): boolean`**
+  - Sets fleet to IDLE and clears ETA
+  - Only allowed for non-critical tasks
+
+### Boost System
+- **`activateBoost(fleetId, boostType): boolean`**
+  - Guardrails:
+    - fleet must be player-owned
+    - boost must not be on cooldown
+  - Effects:
+    - Creates boost entry with duration and cooldown
+    - Applies immediate effect to fleet
+    - Emits intel entry
+
+### Legacy Actions (Updated)
 - **`bootstrapGameState()`**
   - Creates initial state (seeded galaxy, initial fleets, empty resources).
 - **`getState()`**
@@ -195,70 +270,62 @@ All authoritative transitions live in `src/core/GameState.ts`.
 - **`selectFleet(fleetId)`**
   - Player can select only player-owned fleets.
   - Emits intel log entry.
-- **`moveFleet(fleetId, targetSystemId): boolean`**
-  - Guardrails:
-    - `phase` must be `PLAYER`
-    - fleet must be player-owned
-    - must have `movesLeft > 0`
-    - target must be adjacent (`hexDistance == 1`)
-  - Effects:
-    - `fleet.location = targetSystemId`
-    - `movesLeft -= 1`
-    - If system intel is `UNKNOWN`, mark it `SCANNED` and `discovered = true`
-    - Emit intel entries
 - **`buildFleet(blueprintKey, atSystemId): boolean`**
   - Guardrails:
-    - `phase` must be `PLAYER`
     - must have enough `tieredMetals` for the blueprint cost
   - Effects:
     - deduct metals
     - create a new `Fleet` at the selected system
     - emit intel
-- **`endTurn()`**
-  - Only valid in `PLAYER` phase.
-  - Pipeline:
-    - Apply mining
-    - Switch to `ENEMY` phase
-    - Run enemy step
-    - Increment turn
-    - Reset player moves
-    - Switch back to `PLAYER` phase
 - **`saveGame()`** / **`loadGame()`**
   - JSON serialization to `localStorage` key `hexfleet_save_v1`.
   - Minimal version validation.
 - **`newGame()`**
   - Calls `bootstrapGameState()`.
 
-## 6.2 Turn economy
+## 6.2 Real-Time Timing System
 
-### Turn Parameters
-- **Moves per turn**: `MOVES_PER_TURN = 2` (constant in `GameState.ts`)
-- **Turn reset**: At end of `endTurn()`, all player fleets get `movesLeft = maxMoves = MOVES_PER_TURN`
-- **Phase structure**: PLAYER → ENEMY → TURN_INCREMENT → PLAYER
-- **Turn limit**: Optional, default unlimited
+### Tick Parameters
+- **Tick rate**: `TICKS_PER_SECOND = 10` (configurable, default 10)
+- **Tick duration**: 100ms per tick at default rate
+- **Simulation state**: `paused` flag stops all tick processing
+- **Deterministic timing**: All actions timestamped to specific ticks
+
+### Task Timing
+- **Movement**: 3 seconds per hex = 30 ticks per hex
+- **Mining**: Continuous yield per tick based on tier/richness
+- **Scanning**: 8 seconds base = 80 ticks (modified by boosts)
+- **Salvage**: 5 seconds base = 50 ticks per operation
+- **Suppression**: Continuous pressure reduction per tick
+
+### Boost Timing
+- **OVERCLOCK**: 6 seconds duration = 60 ticks, 30s cooldown = 300 ticks
+- **FOCUS**: 8 seconds duration = 80 ticks, 45s cooldown = 450 ticks  
+- **BRACE**: 10 seconds duration = 100 ticks, 60s cooldown = 600 ticks
 
 ### Movement Rules
 - **Adjacent only**: `hexDistance(from, to) === 1`
-- **Cost**: 1 move point per hex
-- **Diagonal movement**: Supported via axial coordinate system
-- **Enemy movement**: Same rules as player (adjacent only)
+- **ETA calculation**: `distance * TICKS_PER_HEX` (30 ticks default)
+- **Task interruption**: Some tasks can be cancelled, others must complete
+- **Real-time pathfinding**: Simple adjacent-only for Phase 1
 
-## 6.3 Mining
+## 6.3 Continuous Mining System
 
-Mining is executed at the end of the player phase (`applyMiningForPlayerTurn()` called inside `endTurn()`).
+Mining is executed continuously during each tick for fleets with active MINE tasks.
 
 ### Eligibility
 - `fleet.owner === 'PLAYER'`
-- `fleet.role === 'MINER'`
+- `fleet.task === 'MINE'`
+- `fleet.eta > 0` (still mining)
 - `system.asteroids` exists
 
-### Yield Calculation
+### Yield Calculation (Per Tick)
 ```ts
-// Base yield per mining tier
-const MINER_YIELD_PER_TURN = {
-  T1: 10,  // Base metals per turn
-  T2: 25,
-  T3: 50
+// Base yield per mining tier per tick (10 ticks = 1 second)
+const MINER_YIELD_PER_TICK = {
+  T1: 1,   // 1 metal per tick = 10 metals per second
+  T2: 2.5, // 2.5 metal per tick = 25 metals per second
+  T3: 5    // 5 metal per tick = 50 metals per second
 };
 
 // System richness multiplier
@@ -269,23 +336,83 @@ const RICHNESS_MULTIPLIER = {
   ABUNDANT: 2.0
 };
 
-// Final calculation
-base = MINER_YIELD_PER_TURN[fleet.miningTier];
+// Final calculation per tick
+base = MINER_YIELD_PER_TICK[fleet.miningTier];
 multiplier = RICHNESS_MULTIPLIER[system.asteroids.richness];
-gained = Math.floor(base * multiplier);
+boostMultiplier = hasOverclockBoost(fleet) ? 2.0 : 1.0;
+gained = base * multiplier * boostMultiplier;
 ```
 
 ### Mining Parameters
-- **Moves per turn**: `MOVES_PER_TURN = 2`
-- **Mining requires**: Fleet must be stationary for the turn
-- **Yield cap**: Maximum 100 metals per fleet per turn
+- **Tick processing**: Applied every simulation tick when not paused
+- **Boost effects**: OVERCLOCK provides 2× yield multiplier
+- **Yield capping**: Maximum 10 metals per fleet per tick (100 per second)
 - **Resource type**: Mined into the asteroid's `metalTier`
+- **Station income**: Passive station income added per tick independently
 
-## 6.4 Enemy step (current)
+### Station Income
+- **Passive generation**: Friendly stations generate metals per tick
+- **Station tier**: Higher tier stations generate more resources
+- **No boosts**: Station income not affected by fleet boosts
 
-- Reset enemy `movesLeft`.
-- Choose an adjacent system that reduces `hexDistance(..., SOL)`.
-- Move at most 1 step, emit intel.
+## 6.4 Real-Time Pressure Combat System
+
+Combat is not tactical. It is a real-time pressure meter per system that changes continuously.
+
+### Pressure Mechanics
+- **Pressure generation**: Hostile systems generate pressure while player fleets present
+- **Pressure suppression**: Combat ships reduce pressure through SUPPRESS tasks
+- **Pressure thresholds**: Cause integrity/morale damage when exceeded
+- **Pressure collapse**: Occurs if pressure reaches maximum (100)
+
+### Pressure Calculation (Per Tick)
+```ts
+// System pressure generation per tick
+const PRESSURE_GENERATION = {
+  HOSTILE_STRONGHOLD: 0.5,  // 5 pressure per second
+  ABYSS_ZONE: 1.0,           // 10 pressure per second
+  DERELICT: 0.2,             // 2 pressure per second
+  MINING_SYSTEM: 0.1,        // 1 pressure per second
+  EMPTY_SPACE: 0.0
+};
+
+// Fleet suppression per tick
+function calculateSuppression(fleet: Fleet): number {
+  let suppression = 0;
+  for (const ship of fleet.ships) {
+    if (ship.type === 'CORVETTE') suppression += 0.1;  // 1 per second
+    if (ship.type === 'FRIGATE') suppression += 0.2;   // 2 per second
+    if (ship.type === 'DESTROYER') suppression += 0.3; // 3 per second
+  }
+  return suppression * (fleet.morale / 100); // Morale modifier
+}
+
+// Pressure damage application
+function applyPressureDamage(fleet: Fleet, pressure: number): void {
+  const damageMultiplier = hasBraceBoost(fleet) ? 0.5 : 1.0;
+  
+  if (pressure > PRESSURE_THRESHOLD.CRITICAL) {
+    // Major damage + retreat window closing
+    fleet.integrity = Math.max(0, fleet.integrity - 2 * damageMultiplier);
+    fleet.morale = Math.max(0, fleet.morale - 1 * damageMultiplier);
+  } else if (pressure > PRESSURE_THRESHOLD.WARNING) {
+    // Minor integrity damage
+    fleet.integrity = Math.max(0, fleet.integrity - 0.5 * damageMultiplier);
+  }
+  // SAFE threshold: no damage
+}
+```
+
+### Combat Outcomes (Real-Time)
+- **Stabilized**: pressure reduced below safe threshold (30)
+- **Contained**: pressure held steady but not reduced (30-60)
+- **Forced Retreat**: pressure spikes, player must exit or be destroyed (60-85)
+- **Destruction**: fleet integrity reaches 0 (85-100)
+
+### Enemy AI (Real-Time)
+- **Passive presence**: Enemy systems generate pressure based on tier
+- **Reinforcement spawns**: Optional Phase 2 feature at critical pressure
+- **No enemy fleets**: Pressure system replaces traditional enemy movement for Phase 1
 
 ---
 
@@ -688,22 +815,28 @@ function showCombatFeedback(feedback: CombatFeedback): void {
 
 ---
 
-## 11.1 `GalaxyScene`
+## 11.1 `GalaxyScene` (Real-Time Controls)
 
-- Renders systems and hex grid.
+- Renders systems and hex grid with real-time updates.
 - Handles camera pan and zoom.
 - Input:
-  - Click system: select system; if fleet selected attempt move.
+  - Click system: select system; if fleet selected attempt task assignment.
   - Right click: cycle next player fleet.
-  - `E`: end turn
+  - **`Space`**: toggle pause/resume simulation
+  - **`Q`**: activate Overclock boost on selected fleet (mining)
+  - **`W`**: activate Focus boost on selected fleet (scanning)
+  - **`E`**: activate Brace boost on selected fleet (combat)
   - `1/2/3`: build ship from blueprint keys
   - `N`: new game
   - `Ctrl+S`: save
   - `Ctrl+L`: load
+  - `ESC`: close overlays
 - UI overlays:
-  - Header (turn/phase/selected IDs/resources/hotkeys)
-  - Fleet list (role glyphs and MP)
-  - Intel feed (last N intel entries)
+  - Header (tick/pause status/selected IDs/resources/hotkeys)
+  - Fleet list (role glyphs, current task, ETA, active boosts)
+  - Intel feed (last N intel entries, real-time updates)
+  - Boost indicators (show active boosts and cooldowns)
+  - Pressure bars (for systems with player presence)
 
 ## 11.2 `SystemScene`
 
@@ -791,15 +924,15 @@ Goal: gameplay logic correctness without Phaser.
 
 ---
 
-# 16. Victory & Defeat Conditions (NEW)
+# 16. Victory & Defeat Conditions (RTS-Friendly)
 
-## 16.1 Victory Conditions
+## 16.1 Victory Conditions (Run Goals)
 
 ### Implementation
 ```ts
 function checkVictoryConditions(state: GameState): VictoryResult | null {
   const conditions = {
-    domination: checkDominationVictory(state),
+    deepReach: checkDeepReachVictory(state),
     economic: checkEconomicVictory(state),
     exploration: checkExplorationVictory(state),
     survival: checkSurvivalVictory(state)
@@ -809,7 +942,7 @@ function checkVictoryConditions(state: GameState): VictoryResult | null {
     if (result.achieved) {
       return {
         type: type as VictoryType,
-        turn: state.turn,
+        tick: state.tick,
         score: calculateFinalScore(state, result.bonus)
       };
     }
@@ -818,16 +951,15 @@ function checkVictoryConditions(state: GameState): VictoryResult | null {
   return null;
 }
 
-function checkDominationVictory(state: GameState): VictoryCheck {
-  const allSystems = Object.keys(state.galaxy);
-  const playerSystems = allSystems.filter(id => 
-    isSystemControlledByPlayer(state, id)
-  );
+function checkDeepReachVictory(state: GameState): VictoryCheck {
+  // Survive X minutes in Abyss Zone (target: 5 minutes = 3000 ticks)
+  const abyssTime = state.tick - state.abyssEntryTick;
+  const targetTicks = 3000; // 5 minutes at 10 ticks/sec
   
   return {
-    achieved: playerSystems.length === allSystems.length,
-    progress: playerSystems.length / allSystems.length,
-    bonus: playerSystems.length * 100
+    achieved: abyssTime >= targetTicks,
+    progress: Math.min(abyssTime / targetTicks, 1.0),
+    bonus: 5000
   };
 }
 
@@ -839,6 +971,29 @@ function checkEconomicVictory(state: GameState): VictoryCheck {
     bonus: Math.floor(t3Metals / 100)
   };
 }
+
+function checkExplorationVictory(state: GameState): VictoryCheck {
+  const allSystems = Object.values(state.galaxy);
+  const scannedSystems = allSystems.filter(s => s.intel === 'SCANNED');
+  
+  return {
+    achieved: scannedSystems.length === allSystems.length,
+    progress: scannedSystems.length / allSystems.length,
+    bonus: scannedSystems.length * 200
+  };
+}
+
+function checkSurvivalVictory(state: GameState): VictoryCheck {
+  // Survive for time threshold with at least one fleet (target: 30 minutes)
+  const targetTicks = 18000; // 30 minutes at 10 ticks/sec
+  const hasFleet = Object.values(state.fleets).some(f => f.owner === 'PLAYER');
+  
+  return {
+    achieved: hasFleet && state.tick >= targetTicks,
+    progress: Math.min(state.tick / targetTicks, 1.0),
+    bonus: 3000
+  };
+}
 ```
 
 ## 16.2 Defeat Conditions
@@ -848,15 +1003,14 @@ function checkEconomicVictory(state: GameState): VictoryCheck {
 function checkDefeatConditions(state: GameState): DefeatResult | null {
   const conditions = {
     annihilation: checkFleetAnnihilation(state),
-    resourceCollapse: checkResourceCollapse(state),
-    timeLimit: checkTimeLimit(state)
+    resourceCollapse: checkResourceCollapse(state)
   };
   
   for (const [type, result] of Object.entries(conditions)) {
     if (result.triggered) {
       return {
         type: type as DefeatType,
-        turn: state.turn,
+        tick: state.tick,
         reason: result.reason
       };
     }
@@ -872,19 +1026,33 @@ function checkFleetAnnihilation(state: GameState): DefeatCheck {
     reason: 'All player fleets destroyed'
   };
 }
+
+function checkResourceCollapse(state: GameState): DefeatCheck {
+  const hasMiningCapability = Object.values(state.fleets).some(f => 
+    f.owner === 'PLAYER' && f.miningTier !== undefined
+  );
+  const hasResources = state.resources.tieredMetals.T1 > 0 || 
+                      state.resources.tieredMetals.T2 > 0 || 
+                      state.resources.tieredMetals.T3 > 0;
+  
+  return {
+    triggered: !hasMiningCapability && !hasResources,
+    reason: 'No resources and no mining capability'
+  };
+}
 ```
 
-## 16.3 Scoring System
+## 16.3 Scoring System (RTS-Optimized)
 
 ### Score Calculation
 ```ts
 function calculateFinalScore(state: GameState, victoryBonus: number): number {
   let score = 0;
   
-  // Base score from turn efficiency
-  score += Math.max(0, 10000 - state.turn * 10);
+  // Base score from time efficiency (faster = better)
+  score += Math.max(0, 50000 - state.tick * 2);
   
-  // Resource bonus
+  // Resource bonus (weighted by tier)
   score += state.resources.tieredMetals.T1 * 1;
   score += state.resources.tieredMetals.T2 * 5;
   score += state.resources.tieredMetals.T3 * 20;
@@ -892,12 +1060,16 @@ function calculateFinalScore(state: GameState, victoryBonus: number): number {
   // Fleet survival bonus
   const playerFleets = Object.values(state.fleets).filter(f => f.owner === 'PLAYER');
   score += playerFleets.reduce((sum, fleet) => {
-    return sum + fleet.ships.length * 50;
+    return sum + fleet.ships.length * 100;
   }, 0);
   
   // Discovery bonus
   const discoveredSystems = Object.values(state.galaxy).filter(s => s.discovered).length;
-  score += discoveredSystems * 100;
+  score += discoveredSystems * 150;
+  
+  // Pressure mastery bonus (time spent in hostile systems)
+  const pressureTime = calculatePressureTime(state);
+  score += pressureTime * 10;
   
   // Victory condition bonus
   score += victoryBonus;
@@ -915,16 +1087,16 @@ function calculateFinalScore(state: GameState, victoryBonus: number): number {
 ### Implementation
 ```ts
 interface PerformanceMetrics {
-  loadTime: number;      // < 3000ms target
-  turnProcessing: number; // < 1000ms target
-  memoryUsage: number;    // < 100MB target
-  saveSize: number;      // < 1MB target
+  loadTime: number;           // < 3000ms target
+  tickProcessing: number;      // < 100ms target (10 ticks/sec)
+  memoryUsage: number;        // < 100MB target
+  saveSize: number;          // < 1MB target
 }
 
 function measurePerformance(): PerformanceMetrics {
   return {
     loadTime: performance.now() - loadStartTime,
-    turnProcessing: lastTurnDuration,
+    tickProcessing: lastTickDuration,
     memoryUsage: (performance as any).memory?.usedJSHeapSize || 0,
     saveSize: JSON.stringify(state).length
   };
