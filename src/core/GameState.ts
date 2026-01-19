@@ -41,21 +41,37 @@ import {
   VictoryResult,
   DefeatType,
   DefeatCheck,
-  DefeatResult
+  DefeatResult,
+  ActionResult,
+  FleetTask,
+  MiningBoost
 } from './types';
 
 import { hexDistance } from '../utils/hex';
 import { resolveInvasions } from './Invasion';
 import { getAsteroidHex, isAsteroidHex } from './systemLayout';
 
-const STORAGE_KEY = 'hexfleet_save_v1';
+const STORAGE_KEY = 'hexfleet_save_v2';
 
 // -----------------------------------------------------------------------------
-// Balance knobs
+// Real-time balance knobs
 // -----------------------------------------------------------------------------
 
+const TICKS_PER_SECOND = 10;
+const MINER_YIELD_PER_SECOND: Record<MetalTier, number> = {
+  T1: 2,   // Base metals per second
+  T2: 5,
+  T3: 10
+};
+
+const MINER_YIELD_PER_TICK: Record<MetalTier, number> = {
+  T1: MINER_YIELD_PER_SECOND.T1 / TICKS_PER_SECOND,
+  T2: MINER_YIELD_PER_SECOND.T2 / TICKS_PER_SECOND,
+  T3: MINER_YIELD_PER_SECOND.T3 / TICKS_PER_SECOND
+};
+
+// Legacy turn-based constants (kept for compatibility)
 const MOVES_PER_TURN = 2;
-
 const MINER_YIELD_PER_TURN: Record<MetalTier, number> = {
   T1: 2, // small yield (your requirement)
   T2: 5,
@@ -121,6 +137,7 @@ export function pushIntel(kind: IntelEntry['kind'], text: string): void {
   state.intelLog.push({
     id: uid(),
     turn: state.turn,
+    tick: state.tick,  // NEW: tick-level precision
     ts: now(),
     kind,
     text
@@ -341,6 +358,10 @@ function seedFleets(): Record<string, Fleet> {
       shipType: minerStats.shipType,
       ships: [minerShip],
       location: 'SOL',
+      task: 'IDLE',  // NEW: real-time task system
+      taskTarget: undefined,
+      etaTicks: undefined,
+      boost: undefined,  // NEW: mining boost state
       maxMoves: MOVES_PER_TURN,
       movesLeft: MOVES_PER_TURN,
       integrity: minerStats.integrity,
@@ -357,6 +378,10 @@ function seedFleets(): Record<string, Fleet> {
       shipType: enemyStats.shipType,
       ships: [enemyShip],
       location: 'DELTA',
+      task: 'IDLE',  // NEW: real-time task system
+      taskTarget: undefined,
+      etaTicks: undefined,
+      boost: undefined,  // NEW: mining boost state
       maxMoves: MOVES_PER_TURN,
       movesLeft: MOVES_PER_TURN,
       integrity: enemyStats.integrity,
@@ -410,6 +435,10 @@ export function buildStation(atSystemId: string, free: boolean = false): boolean
     shipType: stationStats.shipType,
     ships: [stationShip],
     location: atSystemId,
+    task: 'IDLE',  // NEW: real-time task system
+    taskTarget: undefined,
+    etaTicks: undefined,
+    boost: undefined,  // NEW: mining boost state
     maxMoves: 0, // Stations can't move
     movesLeft: 0,
     integrity: stationStats.integrity,
@@ -437,18 +466,15 @@ export function buildStation(atSystemId: string, free: boolean = false): boolean
 }
 
 // -----------------------------------------------------------------------------
-// Action Result Types
-// -----------------------------------------------------------------------------
-
-export type ActionResult = { ok: true } | { ok: false; reason: string };
-
-// -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
 
-export function bootstrapGameState(): void {
+export function bootstrapGameState(runSeed?: number): void {
   state = {
-    version: 1,
+    version: 2,  // Updated for real-time mechanics
+    runSeed: runSeed ?? Math.floor(Math.random() * 1000000),  // NEW: seed for reproducible runs
+    tick: 0,     // NEW: tick counter
+    isPaused: false,  // NEW: pause state
     turn: 1,
     phase: 'PLAYER',
     galaxy: seedGalaxy(),
@@ -468,7 +494,7 @@ export function bootstrapGameState(): void {
     intelLog: []
   };
 
-  pushIntel('SYSTEM', 'NEW GAME: Prospector-1 online. Use E to end turn. Use 1/2/3 to build ships. Use S to build stations.');
+  pushIntel('SYSTEM', 'NEW GAME: Prospector-1 online. Use SPACE to pause. Use 1/2/3 to build ships. Use S to build stations.');
   
   // Give player a free starter station at SOL
   buildStation('SOL', true);
@@ -476,6 +502,183 @@ export function bootstrapGameState(): void {
 
 export function getState(): GameState {
   return state;
+}
+
+// -----------------------------------------------------------------------------
+// Real-time simulation core
+// -----------------------------------------------------------------------------
+
+export function togglePause(): void {
+  state.isPaused = !state.isPaused;
+  pushIntel('SYSTEM', state.isPaused ? 'GAME PAUSED' : 'GAME RESUMED');
+}
+
+export function advanceTick(): void {
+  if (state.isPaused) return;
+  
+  state.tick++;
+  
+  // Process fleet tasks
+  for (const fleet of Object.values(state.fleets)) {
+    processFleetTask(fleet);
+  }
+  
+  // Process mining boosts
+  processMiningBoosts();
+  
+  // Process system threats (Phase 2)
+  // processSystemThreats();
+}
+
+export function boostMining(fleetId: string): ActionResult {
+  const fleet = state.fleets[fleetId];
+  if (!fleet) {
+    return { ok: false, reason: 'Fleet not found' };
+  }
+  if (fleet.task !== 'MINE') {
+    return { ok: false, reason: 'Fleet not mining' };
+  }
+  if (fleet.boost && fleet.boost.cooldownTicks > 0) {
+    return { ok: false, reason: 'Boost on cooldown' };
+  }
+  
+  fleet.boost = {
+    fleetId,
+    multiplier: 2.0,
+    durationTicks: 60,  // 6 seconds at 10 ticks/second
+    cooldownTicks: 300   // 30 seconds cooldown
+  };
+  
+  pushIntel('BOOST', `MINING BOOST: ${fleet.name} efficiency doubled for 6 seconds`);
+  return { ok: true, intel: 'Mining boost activated' };
+}
+
+export function assignFleetTask(fleetId: string, task: FleetTask, targetId?: string): ActionResult {
+  const fleet = state.fleets[fleetId];
+  if (!fleet) {
+    return { ok: false, reason: 'Fleet not found' };
+  }
+  
+  if (fleet.owner !== 'PLAYER') {
+    return { ok: false, reason: 'Cannot assign tasks to enemy fleets' };
+  }
+  
+  // Validate task eligibility
+  if (task === 'MINE' && !fleet.miningTier) {
+    return { ok: false, reason: 'Fleet has no mining capability' };
+  }
+  
+  if (task === 'MOVE' && !targetId) {
+    return { ok: false, reason: 'Movement task requires target' };
+  }
+  
+  // Assign task
+  fleet.task = task;
+  fleet.taskTarget = targetId;
+  
+  // Calculate ETA for movement
+  if (task === 'MOVE' && targetId) {
+    const fromSystem = state.galaxy[fleet.location];
+    const toSystem = state.galaxy[targetId];
+    if (fromSystem && toSystem) {
+      const distance = hexDistance(fromSystem.coord, toSystem.coord);
+      fleet.etaTicks = Math.ceil(distance * 30); // 3 seconds per hex
+    }
+  } else {
+    fleet.etaTicks = undefined;
+  }
+  
+  pushIntel('SYSTEM', `TASK: ${fleet.name} assigned to ${task}${targetId ? ` at ${targetId}` : ''}`);
+  return { ok: true, intel: `Task assigned: ${task}` };
+}
+
+function processFleetTask(fleet: Fleet): void {
+  switch (fleet.task) {
+    case 'MOVE':
+      if (fleet.etaTicks !== undefined) {
+        fleet.etaTicks--;
+        if (fleet.etaTicks <= 0) {
+          completeMovement(fleet);
+        }
+      }
+      break;
+      
+    case 'MINE':
+      if (canMine(fleet)) {
+        const minedAmount = calculateMiningYield(fleet);
+        addMetals(state.resources, fleet.miningTier!, minedAmount);
+        pushIntel('MINE', `Mining +${minedAmount} ${fleet.miningTier} metals/tick`);
+      }
+      break;
+      
+    case 'SCAN':
+      // TODO: Implement scanning progress
+      break;
+      
+    case 'FIGHT':
+      // TODO: Implement combat pressure system
+      break;
+  }
+}
+
+function completeMovement(fleet: Fleet): void {
+  if (fleet.taskTarget) {
+    fleet.location = fleet.taskTarget;
+    fleet.task = 'IDLE';
+    fleet.taskTarget = undefined;
+    fleet.etaTicks = undefined;
+    
+    pushIntel('MOVE', `MOVE: ${fleet.name} arrived at ${fleet.location}`);
+  }
+}
+
+function canMine(fleet: Fleet): boolean {
+  if (fleet.owner !== 'PLAYER') return false;
+  if (fleet.task !== 'MINE') return false;
+  
+  const system = state.galaxy[fleet.location];
+  if (!system?.asteroids) return false;
+  if (system.asteroids.yieldRemaining <= 0) return false;
+  
+  // Check if fleet is positioned on asteroid hex
+  if (!fleet.systemPos || !isAsteroidHex(system, fleet.systemPos)) {
+    return false;
+  }
+  
+  return true;
+}
+
+function calculateMiningYield(fleet: Fleet): number {
+  const system = state.galaxy[fleet.location];
+  if (!system?.asteroids) return 0;
+  
+  const miningTier = fleet.miningTier ?? 'T1';
+  let minedAmount = MINER_YIELD_PER_TICK[miningTier];
+  
+  // Apply boost if active
+  if (fleet.boost && fleet.boost.durationTicks > 0) {
+    minedAmount = Math.floor(minedAmount * fleet.boost.multiplier);
+  }
+  
+  // Apply system richness
+  const richnessMultiplier = system.asteroids.richness ?? 1.0;
+  minedAmount = Math.floor(minedAmount * richnessMultiplier);
+  
+  return Math.max(0, minedAmount);
+}
+
+function processMiningBoosts(): void {
+  for (const fleet of Object.values(state.fleets)) {
+    if (fleet.boost) {
+      if (fleet.boost.durationTicks > 0) {
+        fleet.boost.durationTicks--;
+      } else {
+        // Boost expired
+        delete fleet.boost;
+        pushIntel('BOOST', `Mining boost expired for ${fleet.name}`);
+      }
+    }
+  }
 }
 
 export function getMovesLeft(): number {
@@ -496,12 +699,17 @@ export function selectSystem(systemId: string): void {
   }
 }
 
-export function selectFleet(fleetId: string): void {
-  if (!state.fleets[fleetId]) return;
+export function selectFleet(fleetId: string): ActionResult {
+  if (!state.fleets[fleetId]) {
+    return { ok: false, reason: 'Fleet not found' };
+  }
   const f = state.fleets[fleetId];
-  if (f.owner !== 'PLAYER') return; // player can only directly select player fleets
+  if (f.owner !== 'PLAYER') {
+    return { ok: false, reason: 'Cannot select enemy fleets' };
+  }
   state.selectedFleetId = fleetId;
   pushIntel('SYSTEM', `FLEET: ${f.name} selected.`);
+  return { ok: true, intel: `Selected ${f.name}` };
 }
 
 // -----------------------------------------------------------------------------
@@ -659,29 +867,35 @@ export function moveFleetInSystem(fleetId: string, to: HexCoord): ActionResult {
   return { ok: true };
 }
 
-export function moveFleet(fleetId: string, targetSystemId: string): boolean {
+export function moveFleet(fleetId: string, targetSystemId: string): ActionResult {
   const f = state.fleets[fleetId];
   const target = state.galaxy[targetSystemId];
-  if (!f || !target) return false;
+  if (!f) {
+    return { ok: false, reason: 'Fleet not found' };
+  }
+  if (!target) {
+    return { ok: false, reason: 'Target system not found' };
+  }
 
   if (state.phase !== 'PLAYER') {
-    pushIntel('ALERT', 'MOVE BLOCKED: Not in PLAYER phase.');
-    return false;
+    return { ok: false, reason: 'Not in PLAYER phase' };
   }
-  if (f.owner !== 'PLAYER') return false;
+  if (f.owner !== 'PLAYER') {
+    return { ok: false, reason: 'Cannot move enemy fleets' };
+  }
   if (f.movesLeft <= 0) {
-    pushIntel('ALERT', `MOVE BLOCKED: ${f.name} has no moves left.`);
-    return false;
+    return { ok: false, reason: `${f.name} has no moves left` };
   }
 
   const fromCoord = systemCoord(f.location);
   const toCoord = systemCoord(targetSystemId);
-  if (!fromCoord || !toCoord) return false;
+  if (!fromCoord || !toCoord) {
+    return { ok: false, reason: 'Invalid system coordinates' };
+  }
 
   const dist = hexDistance(fromCoord, toCoord);
   if (dist !== 1) {
-    pushIntel('ALERT', `MOVE BLOCKED: ${target.name} is not adjacent.`);
-    return false;
+    return { ok: false, reason: `${target.name} is not adjacent` };
   }
 
   f.location = targetSystemId;
@@ -695,7 +909,7 @@ export function moveFleet(fleetId: string, targetSystemId: string): boolean {
   }
 
   pushIntel('MOVE', `MOVE: ${f.name} -> ${target.name} (${f.movesLeft}/${f.maxMoves} MP)`);
-  return true;
+  return { ok: true, intel: `Moved ${f.name} to ${target.name}` };
 }
 
 export function getBlueprints(): Blueprint[] {
@@ -737,6 +951,10 @@ export function buildFleet(blueprintKey: string, atSystemId: string): boolean {
     shipType: fleetStats.shipType,
     ships: [newShip],
     location: atSystemId,
+    task: 'IDLE',  // NEW: real-time task system
+    taskTarget: undefined,
+    etaTicks: undefined,
+    boost: undefined,  // NEW: mining boost state
     maxMoves: MOVES_PER_TURN,
     movesLeft: MOVES_PER_TURN,
     integrity: fleetStats.integrity,
@@ -909,16 +1127,14 @@ export function mineAsteroid(systemId: string, asteroidObjectId: string): boolea
 // Position-based Mining (Prospector must be on asteroid hex)
 // -----------------------------------------------------------------------------
 
-export function mineAtFleetPosition(fleetId: string): boolean {
+export function mineAtFleetPosition(fleetId: string): ActionResult {
   const fleet = state.fleets[fleetId];
   if (!fleet) {
-    pushIntel('ALERT', 'MINING FAILED: Fleet not found.');
-    return false;
+    return { ok: false, reason: 'Fleet not found' };
   }
 
   if (fleet.owner !== 'PLAYER') {
-    pushIntel('ALERT', 'MINING FAILED: Cannot mine with enemy fleets.');
-    return false;
+    return { ok: false, reason: 'Cannot mine with enemy fleets' };
   }
 
   // Check if fleet has mining capability
@@ -927,39 +1143,33 @@ export function mineAtFleetPosition(fleetId: string): boolean {
   const hasMiningTier = fleet.miningTier !== undefined;
   
   if (!hasMiningRole && !hasMiningShip && !hasMiningTier) {
-    pushIntel('ALERT', 'MINING FAILED: No mining ships in fleet.');
-    return false;
+    return { ok: false, reason: 'No mining ships in fleet' };
   }
 
   // Get current system
   const system = state.galaxy[fleet.location];
   if (!system) {
-    pushIntel('ALERT', 'MINING FAILED: Fleet not in any system.');
-    return false;
+    return { ok: false, reason: 'Fleet not in any system' };
   }
 
   // Check if system has asteroids
   if (!system.asteroids) {
-    pushIntel('ALERT', 'MINING FAILED: No asteroids in this system.');
-    return false;
+    return { ok: false, reason: 'No asteroids in this system' };
   }
 
   // Check if fleet has system position
   if (!fleet.systemPos) {
-    pushIntel('ALERT', 'MINING FAILED: Fleet not positioned in system.');
-    return false;
+    return { ok: false, reason: 'Fleet not positioned in system' };
   }
 
   // Check if fleet is positioned on asteroid hex
   if (!isAsteroidHex(system, fleet.systemPos)) {
-    pushIntel('ALERT', 'MINING FAILED: Prospector must be positioned on asteroid hex.');
-    return false;
+    return { ok: false, reason: 'Must be positioned on asteroid hex to mine' };
   }
 
   // Check if asteroids are depleted
   if (system.asteroids.yieldRemaining <= 0) {
-    pushIntel('ALERT', 'MINING FAILED: Asteroids are depleted.');
-    return false;
+    return { ok: false, reason: 'Asteroids are depleted' };
   }
 
   // Calculate mining yield
@@ -969,8 +1179,7 @@ export function mineAtFleetPosition(fleetId: string): boolean {
   const minedAmount = Math.max(0, Math.floor(baseYield * richness));
 
   if (minedAmount <= 0) {
-    pushIntel('ALERT', 'MINING FAILED: No resources to extract.');
-    return false;
+    return { ok: false, reason: 'No resources to extract' };
   }
 
   // Update resources
@@ -987,7 +1196,10 @@ export function mineAtFleetPosition(fleetId: string): boolean {
     `[${system.asteroids.metalTier}] MINE: ${fleet.name} mined +${minedAmount} ${system.asteroids.metalTier} metals${yieldStatus}`
   );
 
-  return true;
+  return { 
+    ok: true, 
+    intel: `[${system.asteroids.metalTier}] MINE: ${fleet.name} mined +${minedAmount} ${system.asteroids.metalTier} metals${yieldStatus}` 
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -1397,7 +1609,7 @@ export function loadGame(): boolean {
     const parsed = JSON.parse(raw) as GameState;
 
     // minimal validation
-    if (!parsed || parsed.version !== 1) {
+    if (!parsed || parsed.version !== 2) {
       pushIntel('ALERT', 'LOAD FAILED: Bad save version.');
       return false;
     }

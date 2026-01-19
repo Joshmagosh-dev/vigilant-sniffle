@@ -1,19 +1,19 @@
 # HEX FLEET — GAME DESIGN DOCUMENT (GDD)
 
-**Version:** 0.1 (Foundation)  
+**Version:** 0.2 (Clicker RTS Foundation)  
 **Engine:** Phaser 3  
 **Language:** TypeScript  
 **Platform:** PC (Web / Desktop build later)  
-**Genre:** Turn-based Strategy / Fleet Management / Roguelite  
+**Genre:** Real-Time Strategy / Incremental (Clicker) / Fleet Management / Roguelite  
 **Perspective:** Top-down Hex Grid Galaxy Map  
 
 ---
 
 ## 1. High Concept
 
-HexFleet is a turn-based, hex-grid space strategy game focused on fleet survival, exploration, and permanent consequences.
+HexFleet is a real-time, hex-grid space strategy clicker RTS focused on fleet survival, exploration, and permanent consequences.
 
-Players command multiple fleets, scout unknown systems, mine resources, fight hostile forces, and risk permanent fleet loss in a procedurally generated galaxy.
+Players command multiple fleets, scout unknown systems, mine resources in real time, fight hostile forces through escalating "pressure," and rebuild after losses using incremental economy growth.
 
 **Death is meaningful. Progress is strategic. Recovery is possible—but never free.**
 
@@ -36,50 +36,87 @@ Players command multiple fleets, scout unknown systems, mine resources, fight ho
 - Icons visually communicate fleet purpose and threat level
 - Fleets grow organically, not linearly
 
-### D. Risk vs Reward
-- Deeper systems = better loot
-- Abyss zones = extreme danger
-- Retreat is always an option—until it isn’t
+### D. Risk vs Reward (Now Real-Time)
+- Deeper systems = better loot rate + better tier drops
+- Abyss zones = extreme danger over time (pressure ramps)
+- Retreat is always an option—until escalating threats close the window
+
+### E. Real-Time Economy (Clicker Core)
+- Mining and income are continuous (per second)
+- Player actions amplify efficiency through clicks and timed decisions
+- Growth comes from automation + upgrades + fleet routing
 
 ---
 
 ## 3. Player Fantasy
 
-> “I am not an empire. I am a survivor commanding what remains.”
+> "I am not an empire. I am a survivor commanding what remains."
 
 The player experiences:
-- Tension when committing fleets
+- Tension when committing fleets into dangerous systems
 - Loss when ships are destroyed
-- Satisfaction rebuilding stronger
-- Pride in optimized fleet compositions
+- Satisfaction rebuilding stronger through incremental growth
+- Pride in optimized fleet routes and compositions
 
 ---
 
-## 4. Core Gameplay Loop
+## 4. Core Gameplay Loop (Clicker RTS)
 
-1. View Galaxy Map  
-2. Select Fleet  
-3. Move to System  
-4. Scan / Explore / Engage  
-5. Resolve Outcome  
-6. Gain or Lose Resources  
-7. Repair / Dismantle / Rebuild  
-8. Repeat  
+1. View Galaxy Map
+2. Assign / Move Fleets in real time
+3. Mine / Salvage / Scan passively (income ticks)
+4. Click to boost operations (burst efficiency, emergency repairs, rapid scans)
+5. Threat pressure increases in hostile zones
+6. Pull back, reinforce, or risk destruction
+7. Spend resources to build ships/upgrades/automation
+8. Expand deeper and repeat
 
 ---
 
-## 5. Galaxy & Map Design
+## 5. Real-Time Model (Replaces Turns)
+
+### Time & Ticks
+
+The game runs on a deterministic fixed tick loop:
+
+- Example: 10 ticks/second or 20 ticks/second
+- All systems update on ticks:
+  - Mining yield
+  - Threat pressure
+  - Combat resolution progress
+  - Scanning progress
+  - Fleet repair over time (if applicable)
+
+### Pause & Speed Controls (Phase 1)
+
+- Space toggles Pause
+- Optional speed steps later (Phase 2):
+  - 1x / 2x / 4x (still deterministic)
+
+### Determinism Rules
+
+All real-time outcomes must be reproducible from:
+- Seed
+- Tick count
+- Player input events (timestamped to ticks)
+
+---
+
+## 6. Galaxy & Map Design
 
 ### Hex Grid Galaxy
-- Each hex represents one star system
+
+Each hex represents one star system
 
 ### System Properties
+
 - Type
 - Difficulty
 - Resource profile
-- Threat level
+- Threat pressure profile (how danger ramps over time)
 
 ### System Types
+
 - Empty Space
 - Mining System
 - Derelict
@@ -88,10 +125,11 @@ The player experiences:
 
 ---
 
-## 6. Fleets
+## 7. Fleets
 
 ### Fleet Properties
-Fleets are mobile groups of ships that can move between systems.
+
+Fleets are mobile groups of ships that move between systems in real time.
 
 ```ts
 Fleet {
@@ -101,30 +139,31 @@ Fleet {
   location: HexCoord
   integrity: number
   morale: number
+
+  // Clicker RTS additions
+  task: FleetTask        // 'IDLE' | 'MOVE' | 'MINE' | 'SCAN' | 'SALVAGE' | 'FIGHT'
+  taskTarget?: string    // systemId or objectId
+  etaTicks?: number      // for travel timers
 }
 ```
 
+### Fleet Tasks (Real-Time)
+
+- **MOVE**: travel timer counts down; arrival triggers system entry
+- **MINE**: generates metals per second if on a mineable object
+- **SCAN**: progresses intel unlock over time
+- **SALVAGE**: converts wrecks/derelicts into resources over time
+- **FIGHT**: engages hostile pressure; may take damage over time
+
 ---
 
-## 7. Ships
+## 8. Ships
 
 ### Ship Types
 
-- **MINER** - Extracts resources from asteroid fields
-  - Mining tier determines extraction efficiency
-  - Light armor, minimal weapons
-  - High cargo capacity
-
-- **COMBAT** - Fleet protection and engagement
-  - Heavy armor and weapons
-  - No mining capability
-  - Variable sizes (SCOUT, DESTROYER, CRUISER)
-
-- **SCOUT** - Exploration and intelligence gathering
-  - Extended sensor range
-  - Fast movement
-  - Light armament
-  - Reveals fog of war
+- **MINER** — extracts resources (continuous yield)
+- **COMBAT** — reduces threat pressure and prevents losses
+- **SCOUT** — reveals intel faster, expands fog-of-war visibility
 
 ### Ship Properties
 
@@ -133,152 +172,130 @@ Ship {
   id: string
   name: string
   type: ShipType
-  integrity: number    // 0-100
-  morale: number       // 0-100
-  miningTier?: MetalTier  // MINER only
-  weapons?: number     // COMBAT only
-  armor?: number       // COMBAT only
+  integrity: number
+  morale: number
+  miningTier?: MetalTier
+  weapons?: number
+  armor?: number
   buildCost: TieredMetals
+
+  // Clicker RTS additions
+  upkeepT1?: number   // optional later: fleet upkeep per second
 }
 ```
 
 ---
 
-## 8. Combat System
-
-### Abstract Combat Resolution
-
-Combat is resolved through deterministic calculations based on:
-
-- **Fleet Power** - Aggregate of ship weapons, armor, integrity, morale
-- **System Threat** - Based on system type and tier
-- **Intel Quality** - Better intel reduces uncertainty
-- **Terrain Modifiers** - System type affects combat
-
-### Combat Outcomes
-
-- **VICTORY** - Fleet wins with minimal damage
-- **PYRRHIC VICTORY** - Fleet wins but takes heavy damage
-- **RETREAT** - Fleet disengages with moderate damage
-- **DESTRUCTION** - Fleet destroyed, permanent loss
-
-### Damage Model
-
-- **Integrity Damage** - Reduces combat effectiveness
-- **Morale Damage** - Affects future performance
-- **Ship Loss** - Individual ships can be destroyed
-
----
-
-## 9. Resources & Economy
+## 9. Resource & Economy (Clicker Core)
 
 ### Resource Types
 
-- **Tiered Metals** - T1, T2, T3 (basic building materials)
-- **Alloys** - Advanced construction (Phase 2)
-- **Gas** - Fuel and special systems (Phase 2)
-- **Crystals** - High-tech components (Phase 2)
+- **Tiered Metals** — T1, T2, T3
+- **Alloys** — Phase 2
+- **Gas** — Phase 2
+- **Crystals** — Phase 2
 
-### Resource Acquisition
+### Resource Acquisition (Real-Time)
 
-- **Mining** - Primary source of tiered metals
-- **Salvage** - Recover materials from destroyed fleets
-- **Dismantling** - Recover build costs from own ships
-- **Exploration** - Find abandoned resources
+- **Mining (Primary)**: yields per second while mining task active
+- **Click Boost ("Overclock")**: clicking triggers a short burst multiplier
+- **Salvage**: yields per second while salvage task active
+- **Exploration Finds**: discrete rewards on discovery completion
 
-### Build Costs
+### Click Boost Mechanics (Phase 1)
 
-```ts
-ShipBuildCosts {
-  MINER: { T1: 50, T2: 20, T3: 5 }
-  SCOUT: { T1: 30, T2: 10, T3: 0 }
-  COMBAT_SCOUT: { T1: 40, T2: 15, T3: 0 }
-  COMBAT_DESTROYER: { T1: 80, T2: 40, T3: 10 }
-  COMBAT_CRUISER: { T1: 150, T2: 80, T3: 30 }
-}
-```
+Clicking a mining target or a fleet grants:
+- +X% yield for Y seconds (cooldown limited)
+
+Clicking during combat can:
+- "Brace" to reduce damage taken briefly
+
+Clicking during scans can:
+- "Focus" to accelerate scan progress briefly
+
+### Automation (Phase 1)
+
+Fleets can be assigned to a task and will continue until:
+- Threat becomes too high
+- Resource node is depleted (optional later)
+- Player reassigns them
 
 ---
 
-## 10. User Interface
+## 10. Combat System (Real-Time Pressure)
+
+Combat is not tactical. It is a real-time pressure meter per system.
+
+### Threat Pressure
+
+Each hostile system has a pressure value that changes over time:
+- Pressure rises while player is present
+- Combat ships reduce pressure per second
+- If pressure exceeds thresholds:
+  - Fleet takes damage over time
+  - Reinforcements may spawn (Phase 2)
+  - Retreat window narrows
+
+### Combat Outcomes (Real-Time)
+
+- **Stabilized**: pressure reduced below safe threshold
+- **Contained**: pressure held steady but not reduced
+- **Forced Retreat**: pressure spikes, player must exit or be destroyed
+- **Destruction**: fleet integrity reaches 0
+
+---
+
+## 11. User Interface (Clicker RTS)
 
 ### Galaxy Map
 
-- **Hex Grid Display** - Clear system visualization
-- **Fleet Icons** - Glyph-based fleet identification
-- **Fog of War** - Visual distinction for unknown/scanned systems
-- **Resource Overlay** - Current resources displayed
+- Fleet icons animate between hexes
+- Systems show:
+  - Intel state (unknown/scanned)
+  - Threat pressure bar/ring (if known)
+  - Resource icons (if scanned)
 
 ### Fleet Management
 
-- **Fleet Selection** - Click to select, right-click to cycle
-- **Movement Preview** - Show valid moves and costs
-- **Status Display** - Integrity, morale, moves remaining
+- Click fleet → assign task buttons (minimal)
+- Click system → quick actions:
+  - Send selected fleet
+  - Scan
+  - Mine (if miner)
+  - Salvage (if available)
 
-### Information Panels
+### Intel Feed
 
-- **System Details** - Type, resources, threats when scanned
-- **Fleet Composition** - Ships, status, capabilities
-- **Intel Feed** - Turn-by-turn action log
-- **Resource Summary** - Current stockpiles and income
+Realtime log:
+- "Mining +3 T1/sec"
+- "Threat rising"
+- "Fleet integrity -2"
+- "Scan completed: Mining System (T2 potential)"
 
 ### Controls
 
-- **Mouse** - Primary interaction (select, move, inspect)
-- **Keyboard Shortcuts**
-  - `E` - End turn
-  - `1-5` - Build fleet types
-  - `S` - Save game
-  - `L` - Load game
-  - `N` - New game
-  - `ESC` - Close overlays
+- **Mouse click**: select / assign / boost
+- **Space**: Pause
+- **S**: Save
+- **L**: Load
+- **N**: New game
+- **ESC**: Close overlays
 
 ---
 
-## 11. Victory & Defeat Conditions
+## 12. Victory & Defeat Conditions (RTS-Friendly)
 
-### Victory Conditions
+### Victory (Run Goals)
 
-- **Domination** - Control all systems in the galaxy
-- **Economic** - Accumulate 10,000 T3 metals
-- **Exploration** - Discover and scan all system types
-- **Survival** - Survive 100 turns with at least one fleet
+- **Deep Reach**: survive X minutes in Abyss Zone
+- **Economic**: accumulate a target amount of T3
+- **Exploration**: discover and scan all system types
+- **Survival**: survive for a time threshold with at least one fleet
 
-### Defeat Conditions
+### Defeat
 
-- **Fleet Annihilation** - All player fleets destroyed
-- **Resource Collapse** - No resources and no mining capability
-- **Time Limit** - Optional: Turn limit for challenge modes
-
-### Scoring
-
-- **Efficiency Bonus** - Fewer turns = higher score
-- **Resource Multiplier** - Remaining resources add to score
-- **Fleet Survival** - Intact fleets provide score bonus
-- **Discovery Bonus** - Systems explored add to score
-
----
-
-## 12. Progression & Meta
-
-### Fleet Progression
-
-- **Experience** - Fleets gain experience from successful actions
-- **Veterancy** - Improved stats for experienced fleets
-- **Specialization** - Fleets can develop unique capabilities
-
-### Technology (Phase 2)
-
-- **Blueprints** - Unlock new ship types and upgrades
-- **Research** - Improve mining, combat, scanning efficiency
-- **Artifacts** - Find special items in deep space
-
-### Difficulty Scaling
-
-- **Galaxy Size** - Larger galaxies = longer games
-- **Enemy Density** - More hostile systems
-- **Resource Scarcity** - Limited mining opportunities
-- **Abyss Zones** - Endgame high-risk, high-reward areas
+- All fleets destroyed
+- No resources and no mining capability
 
 ---
 
@@ -286,141 +303,47 @@ ShipBuildCosts {
 
 ### Deterministic Foundation
 
-- **Seeded Galaxy** - Same seed produces identical galaxy
-- **Reproducible Combat** - Same inputs = same outcomes
-- **Transparent Math** - All calculations visible to player
+- Seeded galaxy
+- Tick-based simulation
+- Player inputs are recorded as tick events
+- Same seed + same inputs = same results
 
 ### Roguelite Mechanics
 
-- **Permanent Fleet Loss** - Destroyed fleets are gone forever
-- **Resource Scarcity** - Limited recovery options
-- **Strategic Depth** - Every decision has lasting consequences
-- **Run-based Structure** - Each game is a complete session
-
-### Balance Philosophy
-
-- **Skill > Luck** - Player decisions matter more than random chance
-- **Information Asymmetry** - Players work with incomplete intel
-- **Recovery Possible** - Setbacks aren't necessarily game-ending
-- **Meaningful Choices** - No obviously correct decisions
+- Permanent fleet loss
+- Scarcity and tough tradeoffs
+- Recovery through smart automation and routing
 
 ---
 
 ## 14. Audio & Visual Style
 
-### Visual Direction
+(Keep as-is, but tuned for real-time feedback)
 
-- **Clean UI** - Minimalist, information-dense interface
-- **Clear Iconography** - Glyph-based fleet and system identification
-- **Color Coding** - Intuitive use of color for information hierarchy
-- **Subtle Effects** - Polished but non-intrusive animations
+---
 
-### Audio Design
+## 14.5 Motion & Feedback (Phase 1 — Real-Time)
 
-- **Ambient Space** - Low-key atmospheric background
-- **UI Feedback** - Clear, satisfying interaction sounds
-- **Event Audio** - Distinct sounds for combat, discovery, alerts
-- **Minimal Approach** - Audio enhances, doesn't overwhelm
-
-
-
-## 14.5 Motion & Feedback (Phase 1)
-
-Motion in *HexFleet* is **informational**, not decorative.  
-All animation exists to confirm player intent, communicate state changes, and reinforce the passage of turns.
+Motion in HexFleet is informational, not decorative.
 
 ### Core Principles
+
 - Motion never alters game state
-- Game state resolves instantly; visuals animate to match
-- Player input is temporarily locked during critical animations
-- Subtlety over spectacle; clarity over noise
+- Game state resolves via ticks; visuals animate to match
+- Player input may lock briefly during travel animations
+- Subtlety over spectacle
 
 ### Fleet Movement
-- Fleet movement is represented by a short positional tween between hex centers
-- Movement confirms:
-  - Which fleet moved
-  - From where to where
-  - That a turn cost was consumed
-- Duration: **240–320ms**
-- Easing: smooth out (`Cubic.Out` or equivalent)
-- Multiple fleet movements (enemy turns) resolve in controlled sequence
 
-### Idle Fleet Motion
-- Stationary fleets exhibit minimal idle motion
-- Slow, subtle positional drift (1–2px)
-- Represents active systems and living crews
-- Does not interfere with readability or selection
+- Fleet travel is a short tween between hex centers
+- Duration: 240–320ms
+- Easing: Cubic.Out
+- Movement occurs whenever a fleet's location changes due to ETA completion
 
-### Turn Transition Feedback
-- Ending a turn triggers a brief visual transition
-- Fleet movements resolve visibly before player control resumes
-- Turn resolution reinforces that the galaxy has advanced
+### Continuous Status Motion
 
-### System State Motion
-- Systems communicate status through subtle motion cues:
-  - Scanned systems may softly pulse
-  - Hostile systems may flicker faintly
-  - Derelicts may exhibit intermittent static shimmer
-- Motion reinforces system state without requiring player interaction
-
-### Motion Scope Limits
-- No continuous camera drift
-- No real-time unit pathing
-- No decorative background animation in Phase 1
-- All motion is event-driven and state-dependent
-
-
-## 14.6 Motion & Feedback (Phase 2)
-
-Phase 2 motion expands on Phase 1 by introducing **event-driven impact feedback** and **environmental motion**, while maintaining HexFleet’s commitment to clarity, determinism, and restraint.
-
-All Phase 2 motion remains **non-interactive** and **state-reflective**.
-
-### Combat Resolution Feedback
-Combat remains abstract and non-tactical, but its outcome is reinforced through brief, high-impact motion cues.
-
-- Combat resolution triggers short, localized visual feedback at the system hex
-- Possible effects include:
-  - Brief screen shake or impact pulse
-  - Rapid flash or fracture effect on the system marker
-  - Fleet icon compression or disruption to indicate damage
-- Effects are:
-  - Short-lived (sub-second)
-  - Non-repeating
-  - Clearly tied to the combat result
-- Damage is visually represented as it is applied (integrity and morale changes resolve visibly)
-
-Combat motion reinforces **finality and consequence** without simulating battle.
-
-### Anomalies & Environmental Motion
-Certain systems exhibit subtle, continuous motion to indicate unusual or dangerous conditions.
-
-- Anomaly systems may display:
-  - Distortion pulses
-  - Irregular glow patterns
-  - Directional pull or inward drift
-- Abyss Zones may exhibit:
-  - Slow, heavy motion
-  - Darkening gradients or gravitational effects
-  - Persistent environmental animation to signal extreme risk
-
-Environmental motion serves as a **warning language**, not spectacle.
-
-### Discovery & Event Feedback
-Major discoveries and irreversible events are visually acknowledged.
-
-- First-time discovery of system types may trigger:
-  - Brief reveal pulse
-  - Scan-line or data-acquisition effect
-- Critical events (fleet destruction, artifact discovery) trigger:
-  - Short, unmistakable visual response
-  - Paired with clear intel log messaging
-
-### Phase 2 Motion Constraints
-- Motion remains subordinate to information clarity
-- No motion introduces ambiguity into system state
-- Effects never obscure icons, labels, or player input
-- Phase 2 motion builds upon Phase 1 foundations without altering core controls
+- Mining fleets may show a subtle "work pulse" while mining
+- Hostile systems show faint pressure flicker if known
 
 ---
 
@@ -435,7 +358,7 @@ Major discoveries and irreversible events are visually acknowledged.
 ### Performance Targets
 
 - **Load Time** < 3 seconds
-- **Turn Processing** < 1 second
+- **Tick processing stable at chosen tick rate**
 - **Memory Usage** < 100MB
 - **Save Size** < 1MB per game
 
@@ -445,3 +368,13 @@ Major discoveries and irreversible events are visually acknowledged.
 - **Color Blind Friendly** - Not dependent on color alone
 - **Text Scaling** - UI text adjustable
 - **High Contrast** - Option for improved visibility
+
+---
+
+## 16. Non-Goals (Prevents Scope Creep)
+
+- No tactical battle maps in Phase 1
+- No real-time pathfinding inside systems beyond simple target selection
+- No complex economy chains (Phase 2 only)
+- No multiplayer
+- No physics-based combat simulation

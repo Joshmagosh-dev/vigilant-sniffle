@@ -3,7 +3,21 @@
 // HexFleet — shared types (NO Phaser imports)
 // -----------------------------------------------------------------------------
 
+export type FleetTask = 'IDLE' | 'MOVE' | 'MINE' | 'SCAN' | 'SALVAGE' | 'FIGHT';
+
+export type MiningBoost = {
+  fleetId: string;
+  multiplier: number;
+  durationTicks: number;
+  cooldownTicks: number;
+};
+
 export type HexCoord = { q: number; r: number };
+
+// Action result type for all core actions
+export type ActionResult = 
+  | { ok: true; intel?: string }
+  | { ok: false; reason: string };
 
 export type MetalTier = 'T1' | 'T2' | 'T3';
 
@@ -173,7 +187,15 @@ export type Fleet = {
   // NEW: System-level anchor for presentation (serializable)
   systemAnchor?: 'STAR' | `PLANET:${string}` | `ASTEROID:${string}` | `STATION:${string}`;
 
-  // Turn movement points (determined by fleet composition)
+  // NEW: Real-time task system
+  task: FleetTask;
+  taskTarget?: string;  // systemId or objectId for task
+  etaTicks?: number;    // countdown for task completion
+
+  // NEW: Mining boost state
+  boost?: MiningBoost;
+
+  // Legacy movement points (kept for compatibility)
   movesLeft: number;
   maxMoves: number;
 
@@ -191,11 +213,12 @@ export type Fleet = {
 
 export type GamePhase = 'PLAYER' | 'ENEMY';
 
-export type IntelKind = 'MOVE' | 'SCAN' | 'MINE' | 'BUILD' | 'DISMANTLE' | 'ALERT' | 'SYSTEM';
+export type IntelKind = 'MOVE' | 'SCAN' | 'MINE' | 'BUILD' | 'DISMANTLE' | 'ALERT' | 'SYSTEM' | 'BOOST';
 
 export type IntelEntry = {
   id: string;
   turn: number;
+  tick: number;  // NEW: tick-level precision
   ts: number;
   kind: IntelKind;
   text: string;
@@ -270,8 +293,14 @@ export type HexLayout = {
 };
 
 export type GameState = {
-  version: 1;
+  version: 2;  // Updated for real-time mechanics
 
+  // NEW: Real-time simulation fields
+  runSeed: number;
+  tick: number;
+  isPaused: boolean;
+
+  // Legacy turn-based fields (kept for compatibility)
   turn: number;
   phase: GamePhase;
 

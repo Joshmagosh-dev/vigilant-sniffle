@@ -1811,9 +1811,9 @@ export default class SystemScene extends Phaser.Scene {
     }
 
     // Use new position-based mining
-    const success = mineAtFleetPosition(selectedFleetId);
+    const result = mineAtFleetPosition(selectedFleetId);
     
-    if (success) {
+    if (result.ok) {
       this.debugText.setText('DEBUG: Mining successful!');
       this.infoText.setText(`MINING: ${selectedFleet.name} is mining`);
       this.debugState.lastResult = `SUCCESS: Mining at position (${selectedFleet.systemPos?.q}, ${selectedFleet.systemPos?.r})`;
@@ -1835,8 +1835,8 @@ export default class SystemScene extends Phaser.Scene {
       }
     } else {
       this.debugText.setText('DEBUG: Mining failed');
-      this.infoText.setText('MINING FAILED: Check intel log for details');
-      this.debugState.lastResult = 'FAILED: Mining failed';
+      this.infoText.setText(`MINING FAILED: ${result.reason}`);
+      this.debugState.lastResult = `FAILED: ${result.reason}`;
     }
 
     this.refresh();

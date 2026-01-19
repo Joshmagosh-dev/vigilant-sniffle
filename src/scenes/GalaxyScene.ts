@@ -41,13 +41,17 @@ function systemGlyph(sys: StarSystem): string {
   return typeGlyphs[sys.type || 'STAR'] || '•';
 }
 
+function ellipsize(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + '…';
+}
+
 type SysRender = {
   id: string;
-  x: number;
-  y: number;
+  container: Phaser.GameObjects.Container;
   marker: Phaser.GameObjects.Arc;
-  label: Phaser.GameObjects.Text;
-  icon: Phaser.GameObjects.Text; // icon stays on RIGHT side
+  glyphText: Phaser.GameObjects.Text;
+  nameText: Phaser.GameObjects.Text;
+  fleetText?: Phaser.GameObjects.Text;
 };
 
 export default class GalaxyScene extends Phaser.Scene {
@@ -55,7 +59,7 @@ export default class GalaxyScene extends Phaser.Scene {
   private readonly PICK_RADIUS = VisualStyle.pickRadius;
 
   // Layout rule:
-  // - icon stays to the RIGHT of the node
+  // - glyph text stays at TOP of node
   // - name label stays UNDER the node
   private readonly ICON_OFFSET_X = Math.round(VisualStyle.hexSize * 0.55);
   private readonly ICON_OFFSET_Y = 0;
@@ -253,8 +257,8 @@ export default class GalaxyScene extends Phaser.Scene {
       if (key === 'enter') {
         // Enter confirms planned move (turn-based)
         if (this.plannedMove) {
-          const success = moveFleet(this.plannedMove.fleetId, this.plannedMove.targetSystemId);
-          if (success) {
+          const result = moveFleet(this.plannedMove.fleetId, this.plannedMove.targetSystemId);
+          if (result.ok) {
             this.plannedMove = null;
           }
           this.refreshAll();
@@ -454,20 +458,21 @@ export default class GalaxyScene extends Phaser.Scene {
       const yieldInfo = sys.asteroids && sys.asteroids.yieldRemaining < 100 ? 
         ` ${Math.floor(sys.asteroids.yieldRemaining)}%` : '';
       
-      r.icon.setText(`${glyph}${hasAst ? ' ⟡' : ''}${miningIcon}${yieldInfo}`);
+      // Update glyph text with all status icons
+      r.glyphText.setText(`${glyph}${hasAst ? ' ⟡' : ''}${miningIcon}${yieldInfo}`);
 
-      // NAME stays UNDER node: just the system name
-      r.label.setText(sys.name);
+      // Update name text with ellipsis for long names
+      r.nameText.setText(ellipsize(sys.name, 12));
 
       // Marker + text colors
       if (isUnknown) {
         r.marker.setFillStyle(VisualStyle.systemUnknown, 1);
-        r.label.setColor(VisualStyle.uiDim);
-        r.icon.setColor(VisualStyle.uiDim);
+        r.nameText.setColor(VisualStyle.uiDim);
+        r.glyphText.setColor(VisualStyle.uiDim);
       } else {
         r.marker.setFillStyle(VisualStyle.systemNode, 1);
-        r.label.setColor(VisualStyle.uiText);
-        r.icon.setColor(VisualStyle.uiText);
+        r.nameText.setColor(VisualStyle.uiText);
+        r.glyphText.setColor(VisualStyle.uiText);
       }
     }
   }
@@ -591,11 +596,9 @@ export default class GalaxyScene extends Phaser.Scene {
   // ---------------------------------------------------------------------------
 
   private rebuildSystemRenderables(): void {
-    // destroy old
-    for (const s of this.systems) {
-      s.marker.destroy();
-      s.label.destroy();
-      s.icon.destroy();
+    // Destroy old renderables
+    for (const r of this.systems) {
+      r.container.destroy(true);
     }
     this.systems = [];
 
@@ -604,33 +607,54 @@ export default class GalaxyScene extends Phaser.Scene {
     for (const sys of Object.values(st.galaxy)) {
       const p = this.hexToPixel(sys.coord.q, sys.coord.r);
 
-      const marker = this.add.circle(p.x, p.y, 6, VisualStyle.systemNode, 1);
+      // Lane layout (relative to HEX_SIZE)
+      const R = this.HEX_SIZE;
+      const innerW = Math.floor(R * 1.45);
 
-      // ICON (right side)
-      const icon = this.add
-        .text(p.x + this.ICON_OFFSET_X, p.y + this.ICON_OFFSET_Y, '', {
-          font: VisualStyle.smallFont,
-          color: VisualStyle.uiText
-        })
-        .setOrigin(0, 0.5);
+      // Create container for this system
+      const container = this.add.container(p.x, p.y);
 
-      // LABEL (under node)
-      const label = this.add
-        .text(p.x, p.y + this.LABEL_OFFSET_Y, sys.name, {
-          font: VisualStyle.smallFont,
-          color: VisualStyle.uiText
-        })
-        .setOrigin(0.5, 0);
+      // MARKER (center of container)
+      const marker = this.add.circle(0, 0, R * 0.45, 0x000000, 0);
+      marker.setStrokeStyle(2, 0x3a6ea5);
+
+      // GLYPH TEXT (top lane)
+      const glyphText = this.add.text(0, -R * 0.32, '', {
+        fontFamily: 'monospace',
+        fontSize: '16px',
+        color: '#ffffff',
+        align: 'center'
+      }).setOrigin(0.5);
+      glyphText.setFixedSize(innerW, 0);
+      glyphText.setWordWrapWidth(innerW, true);
+
+      // NAME TEXT (bottom lane)
+      const nameText = this.add.text(0, R * 0.38, '', {
+        fontFamily: 'monospace',
+        fontSize: '14px',
+        color: '#9ad6ff',
+        align: 'center'
+      }).setOrigin(0.5);
+      nameText.setFixedSize(innerW, 0);
+      nameText.setWordWrapWidth(innerW, true);
+
+      // Add all children to container
+      container.add([marker, glyphText, nameText]);
 
       this.systems.push({
         id: sys.id,
-        x: p.x,
-        y: p.y,
+        container,
         marker,
-        label,
-        icon
+        glyphText,
+        nameText
       });
     }
+
+    // Debug verification
+    console.log(
+      'TEXT OBJECTS:',
+      this.children.list.filter(o => o.type === 'Text').length
+    );
   }
 
   private pickSystem(worldX: number, worldY: number): SysRender | null {
@@ -638,8 +662,8 @@ export default class GalaxyScene extends Phaser.Scene {
     let bestD = Infinity;
 
     for (const s of this.systems) {
-      const dx = worldX - s.x;
-      const dy = worldY - s.y;
+      const dx = worldX - s.container.x;
+      const dy = worldY - s.container.y;
       const d = Math.sqrt(dx * dx + dy * dy);
       if (d < this.PICK_RADIUS && d < bestD) {
         best = s;
