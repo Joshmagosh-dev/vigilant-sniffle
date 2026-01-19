@@ -13,7 +13,7 @@ import Phaser from 'phaser';
 import type { StarSystem, Fleet } from '../core/types';
 import { getState, selectSystem, selectFleet, moveFleet, endTurn, advanceTurn, saveGame, loadGame, newGame, buildFleet, dismantleFleet, isSystemBeingMined } from '../core/GameState';
 import { VisualStyle } from '../ui/VisualStyle';
-import { hexDistance } from '../utils/hex';
+import { hexDistance, hexToPixel, pixelToHexRounded } from '../utils/hex';
 import { getFleetGlyph } from '../ui/IconKit';
 import { getSystemAffiliation, getAffiliationColor, getHighlightStyle } from '../ui/colors';
 import { createFleetIcon } from '../ui/IconFactory';
@@ -57,6 +57,10 @@ type SysRender = {
 export default class GalaxyScene extends Phaser.Scene {
   private readonly HEX_SIZE = VisualStyle.hexSize;
   private readonly PICK_RADIUS = VisualStyle.pickRadius;
+
+  // Grid origin for coordinate conversion
+  private readonly gridOriginX = 0;
+  private readonly gridOriginY = 0;
 
   // Layout rule:
   // - glyph text stays at TOP of node
@@ -139,7 +143,7 @@ export default class GalaxyScene extends Phaser.Scene {
     });
 
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
-      // treat as click if minimal movement
+      // Treat as click if minimal movement
       const dx = Math.abs(p.x - this.dragStart.x);
       const dy = Math.abs(p.y - this.dragStart.y);
       const isClick = dx < 5 && dy < 5;
@@ -148,9 +152,32 @@ export default class GalaxyScene extends Phaser.Scene {
 
       if (!isClick) return;
 
+      // Get world coordinates (supports camera pan/zoom)
       const world = p.positionToCamera(this.cameras.main) as Phaser.Math.Vector2;
-      const clickedSystem = this.pickSystem(world.x, world.y);
-      if (!clickedSystem) return;
+      
+      // Convert world coordinates to hex coordinates
+      const clickedHex = pixelToHexRounded(
+        world.x, 
+        world.y, 
+        this.HEX_SIZE, 
+        this.gridOriginX, 
+        this.gridOriginY
+      );
+
+      // Debug: Log click coordinates
+      console.log(`[GalaxyScene] Click: world(${world.x.toFixed(1)}, ${world.y.toFixed(1)}) → hex(${clickedHex.q}, ${clickedHex.r})`);
+
+      // Debug: Draw highlight on clicked hex
+      this.drawClickHighlight(clickedHex);
+
+      // Find system at clicked hex coordinates
+      const clickedSystem = this.findSystemAtHex(clickedHex);
+      if (!clickedSystem) {
+        console.log(`[GalaxyScene] No system found at hex (${clickedHex.q}, ${clickedHex.r})`);
+        return;
+      }
+
+      console.log(`[GalaxyScene] Found system: ${clickedSystem.name} (${clickedSystem.id})`);
 
       // Select system always
       selectSystem(clickedSystem.id);
@@ -163,21 +190,38 @@ export default class GalaxyScene extends Phaser.Scene {
       if (fleetId) {
         const f = s.fleets[fleetId];
         const from = s.galaxy[f.location];
-        const to = s.galaxy[clickedSystem.id];
+        const to = clickedSystem;
 
         const isPlayerPhase = s.phase === 'PLAYER';
         const hasMoves = f.movesLeft > 0;
         const isDifferent = f.location !== clickedSystem.id;
         const isAdjacent = from && to ? hexDistance(from.coord, to.coord) === 1 : false;
 
+        console.log(`[GalaxyScene] Move check: phase=${isPlayerPhase}, moves=${hasMoves}, different=${isDifferent}, adjacent=${isAdjacent}`);
+
         moveAttempted = true;
 
         if (isPlayerPhase && hasMoves && isDifferent && isAdjacent) {
-          // Plan the move instead of executing immediately
-          this.plannedMove = { fleetId, targetSystemId: clickedSystem.id };
-          this.refreshAll(); // Update visual feedback
+          // Execute the move immediately
+          const result = moveFleet(fleetId, clickedSystem.id);
+          console.log(`[GalaxyScene] Move result:`, result);
+          
+          if (result.ok) {
+            console.log(`[GalaxyScene] Fleet ${fleetId} moved to ${clickedSystem.id}`);
+            this.refreshAll(); // Update visual feedback
+          } else {
+            console.log(`[GalaxyScene] Move failed: ${result.reason}`);
+            // Show intel message for failure
+            this.openSystemView();
+          }
         } else {
-          // Move failed - open system view
+          // Move failed - log reason and open system view
+          const reasons = [];
+          if (!isPlayerPhase) reasons.push('wrong phase');
+          if (!hasMoves) reasons.push('no moves left');
+          if (!isDifferent) reasons.push('same system');
+          if (!isAdjacent) reasons.push('not adjacent');
+          console.log(`[GalaxyScene] Move failed: ${reasons.join(', ')}`);
           this.openSystemView();
         }
       }
@@ -800,15 +844,45 @@ export default class GalaxyScene extends Phaser.Scene {
   }
 
   // ---------------------------------------------------------------------------
-  // Hex geometry
+  // Helper methods for click handling
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Find a system at the given hex coordinates
+   */
+  private findSystemAtHex(hex: { q: number; r: number }): StarSystem | null {
+    const state = getState();
+    for (const system of Object.values(state.galaxy)) {
+      if (system.coord.q === hex.q && system.coord.r === hex.r) {
+        return system;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Draw a temporary highlight on the clicked hex (debug aid)
+   */
+  private drawClickHighlight(hex: { q: number; r: number }): void {
+    const pixelPos = hexToPixel(hex, this.HEX_SIZE, this.gridOriginX, this.gridOriginY);
+    
+    // Create temporary highlight graphics
+    const highlight = this.add.graphics()
+      .lineStyle(3, 0x00ff00, 0.8) // Green highlight
+      .strokeCircle(pixelPos.x, pixelPos.y, this.HEX_SIZE * 0.9);
+    
+    // Remove highlight after 500ms
+    this.time.delayedCall(500, () => {
+      highlight.destroy();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hex geometry (updated to use utility functions)
   // ---------------------------------------------------------------------------
 
   private hexToPixel(q: number, r: number): { x: number; y: number } {
-    // pointy-top axial to pixel
-    const size = this.HEX_SIZE;
-    const x = size * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r);
-    const y = size * ((3 / 2) * r);
-    return { x, y };
+    return hexToPixel({ q, r }, this.HEX_SIZE, this.gridOriginX, this.gridOriginY);
   }
 
   private drawHexOutline(

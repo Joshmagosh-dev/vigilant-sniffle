@@ -12,6 +12,7 @@ import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlan
 import { startInvasion, getOngoingInvasions } from '../core/Invasion';
 import { reinforcePlanet as reinforcePlanetLegacy, getReinforcementCapacity } from '../core/Reinforcement';
 import { getAsteroidHex, isAsteroidHex } from '../core/systemLayout';
+import { hexToPixel, pixelToHexRounded } from '../utils/hex';
 import { VisualStyle } from '../ui/VisualStyle';
 import { getAffiliationColor, getHighlightStyle, getStationAffiliation, getPlanetAffiliation } from '../ui/colors';
 import { createFleetIcon, createPulseAnimation, createFadeAnimation } from '../ui/IconFactory';
@@ -55,6 +56,10 @@ type SystemObject = {
 export default class SystemScene extends Phaser.Scene {
   private readonly HEX_SIZE = 32;
   private readonly PICK_RADIUS = 20;
+
+  // Grid origin for coordinate conversion (calculated dynamically)
+  private gridOriginX = 0;
+  private gridOriginY = 0;
 
   // Layout rule (match GalaxyScene behavior)
   private readonly ICON_OFFSET_X = Math.round(this.HEX_SIZE * 0.55);
@@ -651,10 +656,7 @@ export default class SystemScene extends Phaser.Scene {
   }
 
   private hexToPixel(q: number, r: number, centerX: number, centerY: number): { x: number; y: number } {
-    const size = this.HEX_SIZE;
-    const x = centerX + size * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r);
-    const y = centerY + size * ((3 / 2) * r);
-    return { x, y };
+    return hexToPixel({ q, r }, this.HEX_SIZE, centerX, centerY);
   }
 
   // ---------------------------------------------------------------------------
@@ -795,38 +797,6 @@ export default class SystemScene extends Phaser.Scene {
     this.updateDiagnostics();
   }
 
-  private pixelToHex(x: number, y: number, centerX: number, centerY: number): { q: number; r: number } {
-    const size = this.HEX_SIZE;
-    const relX = (x - centerX) / size;
-    const relY = (y - centerY) / size;
-    
-    const q = (2/3) * relX;
-    const r = (-1/3) * relX + (Math.sqrt(3)/3) * relY;
-    
-    return this.hexRound(q, r);
-  }
-
-  private hexRound(q: number, r: number): { q: number; r: number } {
-    const s = -q - r;
-    let rq = Math.round(q);
-    let rr = Math.round(r);
-    let rs = Math.round(s);
-    
-    const qDiff = Math.abs(rq - q);
-    const rDiff = Math.abs(rr - r);
-    const sDiff = Math.abs(rs - s);
-    
-    if (qDiff > rDiff && qDiff > sDiff) {
-      rq = -rr - rs;
-    } else if (rDiff > sDiff) {
-      rr = -rq - rs;
-    } else {
-      rs = -rq - rr;
-    }
-    
-    return { q: rq, r: rr };
-  }
-
   // ---------------------------------------------------------------------------
   // Input
   // ---------------------------------------------------------------------------
@@ -901,8 +871,12 @@ export default class SystemScene extends Phaser.Scene {
     const centerX = viewX + 400;
     const centerY = viewY + 300;
 
-    // Convert to hex coordinates
-    const hex = this.pixelToHex(worldX, worldY, centerX, centerY);
+    // Update grid origin for proper coordinate conversion
+    this.gridOriginX = centerX;
+    this.gridOriginY = centerY;
+
+    // Convert to hex coordinates using utility function
+    const hex = pixelToHexRounded(worldX, worldY, this.HEX_SIZE, this.gridOriginX, this.gridOriginY);
     this.debugState.pickedHex = hex;
     
     console.log('[SystemScene] picked hex:', hex);
