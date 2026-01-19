@@ -11,11 +11,35 @@
 import Phaser from 'phaser';
 
 import type { StarSystem, Fleet } from '../core/types';
-import { getState, selectSystem, selectFleet, moveFleet, endTurn, saveGame, loadGame, newGame, buildFleet } from '../core/GameState';
+import { getState, selectSystem, selectFleet, moveFleet, endTurn, advanceTurn, saveGame, loadGame, newGame, buildFleet, dismantleFleet, isSystemBeingMined } from '../core/GameState';
 import { VisualStyle } from '../ui/VisualStyle';
 import { hexDistance } from '../utils/hex';
 import { getFleetGlyph } from '../ui/IconKit';
+import { getSystemAffiliation, getAffiliationColor, getHighlightStyle } from '../ui/colors';
+import { createFleetIcon } from '../ui/IconFactory';
 import type { PerformanceMetrics, AccessibilitySettings } from '../core/types';
+
+function systemGlyph(sys: StarSystem): string {
+  // Return glyph based on system intel and type
+  if (sys.intel === 'UNKNOWN') {
+    return '•'; // Bullet for unknown systems
+  }
+  
+  // Return glyph based on system type
+  const typeGlyphs: Record<string, string> = {
+    'STAR': '✦',
+    'MINING_SYSTEM': '⛏',
+    'DERELICT': '🏚',
+    'HOSTILE_STRONGHOLD': '⚔',
+    'ABYSS_ZONE': '⬢',
+    'EMPTY_SPACE': '·',
+    'NEBULA': '☁',
+    'RUIN': '🏛',
+    'ANOMALY': '✧'
+  };
+  
+  return typeGlyphs[sys.type || 'STAR'] || '•';
+}
 
 type SysRender = {
   id: string;
@@ -246,14 +270,9 @@ export default class GalaxyScene extends Phaser.Scene {
       }
 
       if (key === 'tab') {
-        // Tab cycles through fleets
-        if (e.shiftKey) {
-          // this.selectPreviousPlayerFleet(); // Function doesn't exist yet
-        } else {
-          // this.selectNextPlayerFleet(); // Function doesn't exist yet
+          // Tab cycles through fleets
+          // Placeholder: cycle to next fleet
         }
-        return;
-      }
 
       if (key === 'f') {
         // F key also cycles to next fleet
@@ -428,9 +447,9 @@ export default class GalaxyScene extends Phaser.Scene {
       const sys = s.galaxy[r.id];
 
       const isUnknown = sys.intel === 'UNKNOWN';
-      const glyph = systemGlyph(sys.intel);
+      const glyph = systemGlyph(sys);
       const hasAst = sys.asteroids ? true : false;
-      const isBeingMined = isSystemBeingMined(sys.id);
+      const isBeingMined = isSystemBeingMined(r.id);
       const miningIcon = isBeingMined ? ' ⛏️' : '';
       const yieldInfo = sys.asteroids && sys.asteroids.yieldRemaining < 100 ? 
         ` ${Math.floor(sys.asteroids.yieldRemaining)}%` : '';

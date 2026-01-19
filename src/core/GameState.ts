@@ -46,6 +46,7 @@ import {
 
 import { hexDistance } from '../utils/hex';
 import { resolveInvasions } from './Invasion';
+import { getAsteroidHex, isAsteroidHex } from './systemLayout';
 
 const STORAGE_KEY = 'hexfleet_save_v1';
 
@@ -800,18 +801,29 @@ export function dismantleFleet(fleetId: string): boolean {
 // -----------------------------------------------------------------------------
 
 export function applyMiningForPlayerTurn(): void {
-  // Mine once per end turn, based on current positions
+  // Mine once per end turn, but only if fleet is positioned on asteroid hex
   for (const f of Object.values(state.fleets)) {
     if (f.owner !== 'PLAYER') continue;
-    if (f.role !== 'MINER') continue;
 
     const sys = state.galaxy[f.location];
     if (!sys) continue;
     if (!sys.asteroids) continue;
     if (sys.asteroids.yieldRemaining <= 0) continue; // Skip depleted asteroids
 
-    const minerTier = f.miningTier ?? 'T1';
-    const base = MINER_YIELD_PER_TURN[minerTier];
+    // Check if fleet has mining capability
+    const hasMiningRole = f.role === 'MINER';
+    const hasMiningShip = f.ships.some(ship => ship.type === 'MINER');
+    const hasMiningTier = f.miningTier !== undefined;
+    
+    if (!hasMiningRole && !hasMiningShip && !hasMiningTier) continue;
+
+    // Check if fleet is positioned on asteroid hex
+    if (!f.systemPos) continue;
+    if (!isAsteroidHex(sys, f.systemPos)) continue;
+
+    // Fleet is on asteroid hex - mine it
+    const miningTier = f.miningTier ?? 'T1';
+    const base = MINER_YIELD_PER_TURN[miningTier];
     const gained = Math.max(0, Math.floor(base * (sys.asteroids.richness ?? 1)));
 
     if (gained <= 0) continue;
@@ -825,7 +837,7 @@ export function applyMiningForPlayerTurn(): void {
     const yieldStatus = sys.asteroids.yieldRemaining <= 0 ? ' [DEPLETED]' : ` [${Math.floor(sys.asteroids.yieldRemaining)}%]`;
     pushIntel(
       'MINE',
-      `MINING: ${f.name} +${gained} ${sys.asteroids.metalTier} metals @ ${sys.name}${yieldStatus}`
+      `[${sys.asteroids.metalTier}] MINE: ${f.name} auto-mined +${gained} ${sys.asteroids.metalTier} metals${yieldStatus}`
     );
   }
 }
@@ -888,6 +900,91 @@ export function mineAsteroid(systemId: string, asteroidObjectId: string): boolea
   pushIntel(
     'MINE',
     `MINING: ${miner.name} +${gained} ${sys.asteroids.metalTier} metals from ${asteroidObjectId} @ ${sys.name}`
+  );
+
+  return true;
+}
+
+// -----------------------------------------------------------------------------
+// Position-based Mining (Prospector must be on asteroid hex)
+// -----------------------------------------------------------------------------
+
+export function mineAtFleetPosition(fleetId: string): boolean {
+  const fleet = state.fleets[fleetId];
+  if (!fleet) {
+    pushIntel('ALERT', 'MINING FAILED: Fleet not found.');
+    return false;
+  }
+
+  if (fleet.owner !== 'PLAYER') {
+    pushIntel('ALERT', 'MINING FAILED: Cannot mine with enemy fleets.');
+    return false;
+  }
+
+  // Check if fleet has mining capability
+  const hasMiningRole = fleet.role === 'MINER';
+  const hasMiningShip = fleet.ships.some(ship => ship.type === 'MINER');
+  const hasMiningTier = fleet.miningTier !== undefined;
+  
+  if (!hasMiningRole && !hasMiningShip && !hasMiningTier) {
+    pushIntel('ALERT', 'MINING FAILED: No mining ships in fleet.');
+    return false;
+  }
+
+  // Get current system
+  const system = state.galaxy[fleet.location];
+  if (!system) {
+    pushIntel('ALERT', 'MINING FAILED: Fleet not in any system.');
+    return false;
+  }
+
+  // Check if system has asteroids
+  if (!system.asteroids) {
+    pushIntel('ALERT', 'MINING FAILED: No asteroids in this system.');
+    return false;
+  }
+
+  // Check if fleet has system position
+  if (!fleet.systemPos) {
+    pushIntel('ALERT', 'MINING FAILED: Fleet not positioned in system.');
+    return false;
+  }
+
+  // Check if fleet is positioned on asteroid hex
+  if (!isAsteroidHex(system, fleet.systemPos)) {
+    pushIntel('ALERT', 'MINING FAILED: Prospector must be positioned on asteroid hex.');
+    return false;
+  }
+
+  // Check if asteroids are depleted
+  if (system.asteroids.yieldRemaining <= 0) {
+    pushIntel('ALERT', 'MINING FAILED: Asteroids are depleted.');
+    return false;
+  }
+
+  // Calculate mining yield
+  const miningTier = fleet.miningTier ?? 'T1';
+  const baseYield = MINER_YIELD_PER_TURN[miningTier];
+  const richness = system.asteroids.richness ?? 1.0;
+  const minedAmount = Math.max(0, Math.floor(baseYield * richness));
+
+  if (minedAmount <= 0) {
+    pushIntel('ALERT', 'MINING FAILED: No resources to extract.');
+    return false;
+  }
+
+  // Update resources
+  addMetals(state.resources, system.asteroids.metalTier, minedAmount);
+
+  // Update asteroid yield
+  const depletionAmount = (minedAmount / system.asteroids.totalYield) * 100;
+  system.asteroids.yieldRemaining = Math.max(0, system.asteroids.yieldRemaining - depletionAmount);
+
+  // Log success
+  const yieldStatus = system.asteroids.yieldRemaining <= 0 ? ' [DEPLETED]' : ` [${Math.floor(system.asteroids.yieldRemaining)}%]`;
+  pushIntel(
+    'MINE',
+    `[${system.asteroids.metalTier}] MINE: ${fleet.name} mined +${minedAmount} ${system.asteroids.metalTier} metals${yieldStatus}`
   );
 
   return true;

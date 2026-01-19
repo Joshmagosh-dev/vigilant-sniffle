@@ -8,9 +8,10 @@
 // -----------------------------------------------------------------------------
 
 import Phaser from 'phaser';
-import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController, selectSystemObject, getSelectedSystemObject, mineSelectedObject, invadeSelectedObject, reinforceSelectedObject, listSystemObjects, createPlanet, setFleetAnchor, moveFleetInSystem } from '../core/GameState';
+import { getState, mineAsteroid, isSystemBeingMined, invadePlanet, reinforcePlanet, getPlanetController, selectSystemObject, getSelectedSystemObject, mineSelectedObject, invadeSelectedObject, reinforceSelectedObject, listSystemObjects, createPlanet, setFleetAnchor, moveFleetInSystem, mineAtFleetPosition } from '../core/GameState';
 import { startInvasion, getOngoingInvasions } from '../core/Invasion';
 import { reinforcePlanet as reinforcePlanetLegacy, getReinforcementCapacity } from '../core/Reinforcement';
+import { getAsteroidHex, isAsteroidHex } from '../core/systemLayout';
 import { VisualStyle } from '../ui/VisualStyle';
 import { getAffiliationColor, getHighlightStyle, getStationAffiliation, getPlanetAffiliation } from '../ui/colors';
 import { createFleetIcon, createPulseAnimation, createFadeAnimation } from '../ui/IconFactory';
@@ -312,6 +313,24 @@ export default class SystemScene extends Phaser.Scene {
       }
 
       this.systemObjects.push(obj);
+    }
+
+    // Add deterministic asteroid if system has asteroids
+    if (system.asteroids) {
+      const asteroidHex = getAsteroidHex(system);
+      if (asteroidHex) {
+        const asteroidObj: SystemObject = {
+          id: `${system.id}-asteroid`,
+          objectId: `${systemId}:asteroid:0`,
+          type: 'asteroid',
+          coord: asteroidHex,
+          name: `${system.name} Asteroid Field`,
+          marker: null as any,
+          label: null as any,
+          icon: null as any
+        };
+        this.systemObjects.push(asteroidObj);
+      }
     }
 
     // Create visual representations
@@ -682,6 +701,21 @@ export default class SystemScene extends Phaser.Scene {
           .strokeCircle(pos.x, pos.y, this.HEX_SIZE * 1.5);
       }
     }
+
+    // Draw selected fleet position highlight
+    const state = getState();
+    const selectedFleetId = state.selectedFleetId;
+    if (selectedFleetId) {
+      const selectedFleet = state.fleets[selectedFleetId];
+      if (selectedFleet && selectedFleet.location === state.selectedSystemId && selectedFleet.systemPos) {
+        const fleetPos = this.hexToPixel(selectedFleet.systemPos.q, selectedFleet.systemPos.r, centerX, centerY);
+        
+        // Draw fleet selection ring (blue)
+        this.selectionLayer
+          .lineStyle(2, 0x4a9eff, 1)
+          .strokeCircle(fleetPos.x, fleetPos.y, this.HEX_SIZE * 0.9);
+      }
+    }
   }
   
   private pulseAsteroid(asteroidId: string): void {
@@ -718,7 +752,8 @@ export default class SystemScene extends Phaser.Scene {
   // ---------------------------------------------------------------------------
 
   private tryMoveSelectedFleetTo(to: { q: number; r: number }): void {
-    const selectedFleetId = this.selectedObjectId;
+    const state = getState();
+    const selectedFleetId = state.selectedFleetId;
     if (!selectedFleetId) {
       this.infoText.setText('No fleet selected');
       this.debugState.lastResult = 'FAILED: No fleet selected';
@@ -726,7 +761,6 @@ export default class SystemScene extends Phaser.Scene {
       return;
     }
 
-    const state = getState();
     const selectedFleet = state.fleets[selectedFleetId];
     if (!selectedFleet) {
       this.infoText.setText('Selected fleet not found');
@@ -962,16 +996,16 @@ export default class SystemScene extends Phaser.Scene {
       this.debugState.lastResult = `OK: Selected ${clickedObject.type} "${clickedObject.name}"`;
       this.selectedObjectId = clickedObject.id;
       
-      // NEW: Check for mining interaction
+      // Check for mining interaction on asteroid
       if (clickedObject.type === 'asteroid') {
-        const selectedFleetId = this.selectedObjectId;
+        const selectedFleetId = state.selectedFleetId;
         if (selectedFleetId) {
           const selectedFleet = state.fleets[selectedFleetId];
-          if (selectedFleet && selectedFleet.location === systemId && selectedFleet.role === 'MINER') {
+          if (selectedFleet && selectedFleet.location === systemId) {
             console.log('[SystemScene] attempting mining on asteroid:', clickedObject.name);
             this.debugState.lastAction = 'MINING_ATTEMPT';
             
-            // Use existing mining method
+            // Try position-based mining
             this.tryMineSelected();
             this.updateDiagnostics();
             return;
@@ -1006,13 +1040,14 @@ export default class SystemScene extends Phaser.Scene {
     }
 
     // Empty hex - try to move selected fleet
-    if (this.selectedObjectId) {
-      const selectedFleet = state.fleets[this.selectedObjectId];
+    const selectedFleetId = state.selectedFleetId;
+    if (selectedFleetId) {
+      const selectedFleet = state.fleets[selectedFleetId];
       if (selectedFleet && selectedFleet.location === systemId) {
         console.log('[SystemScene] attempting fleet movement to:', q, r);
         this.debugState.lastAction = 'MOVE_FLEET';
         
-        // Use the new movement pipeline
+        // Use new movement pipeline
         this.tryMoveSelectedFleetTo({ q, r });
         return;
       }
@@ -1079,6 +1114,9 @@ export default class SystemScene extends Phaser.Scene {
     
     const targetPos = this.hexToPixel(targetHex.q, targetHex.r, centerX, centerY);
     
+    // Kill any existing tweens for this sprite
+    this.tweens.killTweensOf(sprite);
+    
     // Set animation flag to block input
     this.isUnitAnimating = true;
     this.debugText.setText('DEBUG: Animating fleet movement...');
@@ -1087,8 +1125,8 @@ export default class SystemScene extends Phaser.Scene {
       targets: sprite,
       x: targetPos.x,
       y: targetPos.y,
-      duration: 250,
-      ease: 'Sine.easeInOut',
+      duration: 280,
+      ease: 'Cubic.easeOut',
       onComplete: () => {
         // Clear animation flag
         this.isUnitAnimating = false;
@@ -1547,11 +1585,16 @@ export default class SystemScene extends Phaser.Scene {
     // Update or create fleet sprites
     for (const fleet of fleetsInSystem) {
       if (this.systemFleetSprites[fleet.id]) {
-        // Update existing sprite position based on anchor
+        // Update existing sprite position based on systemPos
         this.updateFleetPosition(fleet.id, centerX, centerY);
       } else {
-        // Create new sprite
-        const pos = this.getFleetPosition(fleet, centerX, centerY);
+        // Initialize system position if not set
+        if (!fleet.systemPos) {
+          fleet.systemPos = { q: 0, r: 0 }; // Start at center
+        }
+        
+        // Create new sprite at system position
+        const pos = this.hexToPixel(fleet.systemPos.q, fleet.systemPos.r, centerX, centerY);
         const sprite = createFleetIcon(
           this,
           pos.x,
@@ -1747,45 +1790,52 @@ export default class SystemScene extends Phaser.Scene {
       return;
     }
 
-    const selectedObject = getSelectedSystemObject();
-    if (!selectedObject || selectedObject.systemId !== systemId) {
-      this.debugText.setText('DEBUG: No object selected');
+    const selectedFleetId = state.selectedFleetId;
+    if (!selectedFleetId) {
+      this.debugText.setText('DEBUG: No fleet selected');
+      this.infoText.setText('MINING FAILED: No fleet selected');
       return;
     }
 
-    // Find the visual object
-    const selected = this.systemObjects.find(obj => obj.objectId === selectedObject.objectId);
-    if (!selected || selected.type !== 'asteroid') {
-      this.debugText.setText('DEBUG: Selected object is not an asteroid');
+    const selectedFleet = state.fleets[selectedFleetId];
+    if (!selectedFleet) {
+      this.debugText.setText('DEBUG: Selected fleet not found');
       return;
     }
 
-    // Check if player has miner at this system
-    const miner = Object.values(state.fleets).find(f => 
-      f.owner === 'PLAYER' && 
-      f.role === 'MINER' && 
-      f.location === systemId
-    );
-
-    if (!miner) {
-      this.debugText.setText('DEBUG: No miner fleet at this system');
-      this.infoText.setText('MINING FAILED: No miner fleet at this system');
+    // Check if fleet is in this system
+    if (selectedFleet.location !== systemId) {
+      this.debugText.setText('DEBUG: Selected fleet not in this system');
+      this.infoText.setText('MINING FAILED: Fleet not in this system');
       return;
     }
 
-    // Attempt mining
-    const success = mineAsteroid(systemId, selected.id);
+    // Use new position-based mining
+    const success = mineAtFleetPosition(selectedFleetId);
     
     if (success) {
       this.debugText.setText('DEBUG: Mining successful!');
-      this.infoText.setText(`MINING: ${miner.name} mined ${selected.name}`);
-      this.debugState.lastResult = `SUCCESS: Mined ${selected.name}`;
+      this.infoText.setText(`MINING: ${selectedFleet.name} is mining`);
+      this.debugState.lastResult = `SUCCESS: Mining at position (${selectedFleet.systemPos?.q}, ${selectedFleet.systemPos?.r})`;
       
-      // Add visual pulse effect
-      this.pulseAsteroid(selected.id);
+      // Add visual pulse effect if asteroid exists
+      const system = state.galaxy[systemId];
+      if (system?.asteroids) {
+        const asteroidHex = getAsteroidHex(system);
+        if (asteroidHex) {
+          const asteroidObj = this.systemObjects.find(obj => 
+            obj.type === 'asteroid' && 
+            obj.coord.q === asteroidHex.q && 
+            obj.coord.r === asteroidHex.r
+          );
+          if (asteroidObj) {
+            this.pulseAsteroid(asteroidObj.id);
+          }
+        }
+      }
     } else {
       this.debugText.setText('DEBUG: Mining failed');
-      this.infoText.setText('MINING FAILED: Cannot mine this asteroid');
+      this.infoText.setText('MINING FAILED: Check intel log for details');
       this.debugState.lastResult = 'FAILED: Mining failed';
     }
 
