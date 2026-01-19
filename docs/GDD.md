@@ -1,11 +1,7 @@
 # HEX FLEET — GAME DESIGN DOCUMENT (GDD)
 
-**Version:** 0.2 (Clicker RTS Foundation)  
-**Engine:** Phaser 3  
-**Language:** TypeScript  
-**Platform:** PC (Web / Desktop build later)  
-**Genre:** Real-Time Strategy / Incremental (Clicker) / Fleet Management / Roguelite  
-**Perspective:** Top-down Hex Grid Galaxy Map  
+**Version:** 0.3 (Clicker RTS Implementation)
+**Last updated:** 2025-01-19
 
 ---
 
@@ -36,7 +32,7 @@ Players command multiple fleets, scout unknown systems, mine resources in real t
 - Icons visually communicate fleet purpose and threat level
 - Fleets grow organically, not linearly
 
-### D. Risk vs Reward (Now Real-Time)
+### D. Risk vs Reward (Real-Time)
 - Deeper systems = better loot rate + better tier drops
 - Abyss zones = extreme danger over time (pressure ramps)
 - Retreat is always an option—until escalating threats close the window
@@ -48,172 +44,99 @@ Players command multiple fleets, scout unknown systems, mine resources in real t
 
 ---
 
-## 3. Player Fantasy
+## 3. The Three Loops
 
-> "I am not an empire. I am a survivor commanding what remains."
+### A. Income Loop (Resources per Second)
+1. **Fleets mine asteroids** when positioned on asteroid hexes
+2. **Fleets salvage derelicts** when positioned on derelict hexes  
+3. **Passive station income** from captured stations
+4. **Click boosts** provide temporary efficiency multipliers
+5. **Upgrades** permanently improve base yields and capabilities
 
-The player experiences:
-- Tension when committing fleets into dangerous systems
-- Loss when ships are destroyed
-- Satisfaction rebuilding stronger through incremental growth
-- Pride in optimized fleet routes and compositions
+### B. Pressure Loop (Threat Over Time)
+1. **Hostile systems generate pressure** while player fleets present
+2. **Pressure rises** based on system tier and presence
+3. **Combat ships suppress pressure** through SUPPRESS tasks
+4. **Pressure thresholds** cause integrity/morale damage
+5. **Collapse occurs** if pressure reaches maximum
 
----
-
-## 4. Core Gameplay Loop (Clicker RTS)
-
-1. View Galaxy Map
-2. Assign / Move Fleets in real time
-3. Mine / Salvage / Scan passively (income ticks)
-4. Click to boost operations (burst efficiency, emergency repairs, rapid scans)
-5. Threat pressure increases in hostile zones
-6. Pull back, reinforce, or risk destruction
-7. Spend resources to build ships/upgrades/automation
-8. Expand deeper and repeat
-
----
-
-## 5. Real-Time Model (Replaces Turns)
-
-### Time & Ticks
-
-The game runs on a deterministic fixed tick loop:
-
-- Example: 10 ticks/second or 20 ticks/second
-- All systems update on ticks:
-  - Mining yield
-  - Threat pressure
-  - Combat resolution progress
-  - Scanning progress
-  - Fleet repair over time (if applicable)
-
-### Pause & Speed Controls (Phase 1)
-
-- Space toggles Pause
-- Optional speed steps later (Phase 2):
-  - 1x / 2x / 4x (still deterministic)
-
-### Determinism Rules
-
-All real-time outcomes must be reproducible from:
-- Seed
-- Tick count
-- Player input events (timestamped to ticks)
+### C. Expansion Loop (Strategic Growth)
+1. **Explore unknown systems** to reveal resources and threats
+2. **Build new fleets** using accumulated metals
+3. **Capture stations** for strategic advantages
+4. **Upgrade capabilities** to access deeper systems
+5. **Survive escalating threats** while growing economy
 
 ---
 
-## 6. Galaxy & Map Design
+## 4. Real-Time Model
 
-### Hex Grid Galaxy
+### Tick-Based Simulation
+- **Fixed tick rate:** 10 ticks per second (configurable)
+- **Deterministic outcomes:** Same seed + same actions = same results
+- **Event-driven:** Player inputs timestamped to specific ticks
+- **Pause/Resume:** Space bar pauses simulation
 
-Each hex represents one star system
+### Fleet Tasks
+- **IDLE:** Fleet waits for orders
+- **MOVE:** Travel between systems with ETA countdown
+- **MINE:** Extract resources from asteroids (requires position)
+- **SCAN:** Reveal intel about system objects
+- **SALVAGE:** Extract scrap from derelicts
+- **SUPPRESS:** Combat threat pressure in hostile systems
 
-### System Properties
-
-- Type
-- Difficulty
-- Resource profile
-- Threat pressure profile (how danger ramps over time)
-
-### System Types
-
-- Empty Space
-- Mining System
-- Derelict
-- Hostile Stronghold
-- Abyss Zone (endgame)
-
----
-
-## 7. Fleets
-
-### Fleet Properties
-
-Fleets are mobile groups of ships that move between systems in real time.
-
-```ts
-Fleet {
-  id: string
-  name: string
-  ships: Ship[]
-  location: HexCoord
-  integrity: number
-  morale: number
-
-  // Clicker RTS additions
-  task: FleetTask        // 'IDLE' | 'MOVE' | 'MINE' | 'SCAN' | 'SALVAGE' | 'FIGHT'
-  taskTarget?: string    // systemId or objectId
-  etaTicks?: number      // for travel timers
-}
-```
-
-### Fleet Tasks (Real-Time)
-
-- **MOVE**: travel timer counts down; arrival triggers system entry
-- **MINE**: generates metals per second if on a mineable object
-- **SCAN**: progresses intel unlock over time
-- **SALVAGE**: converts wrecks/derelicts into resources over time
-- **FIGHT**: engages hostile pressure; may take damage over time
+### Time Scale
+- **Movement:** 3 seconds per hex (30 ticks)
+- **Mining:** Continuous yield per tick based on tier/richness
+- **Boosts:** 6-10 second durations with 30-60 second cooldowns
+- **Pressure:** Rises/falls based on fleet presence and actions
 
 ---
 
-## 8. Ships
+## 5. Fleet and Ship Properties
+
+### Fleet Composition
+- **Ships array:** Authoritative list of individual ships
+- **Role derived:** MINER if any miner ship, COMBAT otherwise
+- **Stats aggregated:** Integrity/morale averaged from ships
+- **Mining tier:** Best mining tier among ships
 
 ### Ship Types
+- **MINER:** Mining capability, T1-T3 yield potential
+- **CORVETTE:** Basic combat, pressure suppression
+- **FRIGATE:** Medium combat, better suppression
+- **DESTROYER:** Heavy combat, strong suppression
 
-- **MINER** — extracts resources (continuous yield)
-- **COMBAT** — reduces threat pressure and prevents losses
-- **SCOUT** — reveals intel faster, expands fog-of-war visibility
-
-### Ship Properties
-
-```ts
-Ship {
-  id: string
-  name: string
-  type: ShipType
-  integrity: number
-  morale: number
-  miningTier?: MetalTier
-  weapons?: number
-  armor?: number
-  buildCost: TieredMetals
-
-  // Clicker RTS additions
-  upkeepT1?: number   // optional later: fleet upkeep per second
-}
-```
+### Fleet State
+- **Location:** System ID (galaxy) or hex coord (system)
+- **Task:** Current action (IDLE/MOVE/MINE/SCAN/SALVAGE/SUPPRESS)
+- **ETA:** Countdown for task completion
+- **Boosts:** Active temporary effects with cooldowns
 
 ---
 
-## 9. Resource & Economy (Clicker Core)
+## 6. Resources and Economy
 
-### Resource Types
+### Tiered Metals
+- **T1 (Common):** Basic construction, low-tier fleets
+- **T2 (Uncommon):** Mid-tier fleets, better equipment
+- **T3 (Rare):** High-tier fleets, best capabilities
 
-- **Tiered Metals** — T1, T2, T3
-- **Alloys** — Phase 2
-- **Gas** — Phase 2
-- **Crystals** — Phase 2
+### Income Sources
+- **Mining:** Base yield per second × richness × boost × upgrades
+- **Salvage:** Derelict depletion rate × efficiency × upgrades
+- **Stations:** Passive income from captured infrastructure
 
-### Resource Acquisition (Real-Time)
+### Click Boosts
+- **Overclock:** 2× mining yield for 6 seconds (30s cooldown)
+- **Focus:** 3× scan speed for 8 seconds (45s cooldown)
+- **Brace:** 50% pressure damage reduction for 10 seconds (60s cooldown)
 
-- **Mining (Primary)**: yields per second while mining task active
-- **Click Boost ("Overclock")**: clicking triggers a short burst multiplier
-- **Salvage**: yields per second while salvage task active
-- **Exploration Finds**: discrete rewards on discovery completion
-
-### Click Boost Mechanics (Phase 1)
-
-Clicking a mining target or a fleet grants:
-- +X% yield for Y seconds (cooldown limited)
-
-Clicking during combat can:
-- "Brace" to reduce damage taken briefly
-
-Clicking during scans can:
-- "Focus" to accelerate scan progress briefly
-
-### Automation (Phase 1)
+### Upgrades
+- **Mining Yield:** Permanent +25% per level
+- **Scan Speed:** Permanent +50% per level
+- **Suppression:** Permanent +20% pressure reduction per level
+- **Integrity:** Permanent +15 max integrity per level
 
 Fleets can be assigned to a task and will continue until:
 - Threat becomes too high
