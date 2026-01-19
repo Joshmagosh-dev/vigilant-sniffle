@@ -127,12 +127,13 @@ All types below are defined in `src/core/types.ts`.
 
 ## 5.3 Fleets
 
-- **`Ship`** (NEW)
+- **`Ship`** (UPDATED)
   - Identity: `id`, `name`, `type: ShipType`
   - Status: `integrity` (0..100), `morale` (0..100)
   - Mining: `miningTier?: MetalTier` (only for MINER ships)
   - Combat: `weapons?: number`, `armor?: number` (for combat ships)
   - Economics: `buildCost: Partial<TieredMetals>` (for dismantling calculations)
+  - **NEW**: Ship tier affects combat effectiveness and build costs
 
 - **`Fleet`** (UPDATED)
   - Identity: `id`, `name`, `owner: 'PLAYER' | 'ENEMY'`
@@ -443,7 +444,7 @@ The GDD specifies “no tactical battle screen (Phase 1)”. We will implement a
 
 ### Combat Power Calculation
 ```ts
-// Fleet power calculation
+// Fleet power calculation (UPDATED)
 function calculateFleetPower(fleet: Fleet): number {
   let power = 0;
   for (const ship of fleet.ships) {
@@ -457,7 +458,7 @@ function calculateFleetPower(fleet: Fleet): number {
   return power * (fleet.morale / 100); // Fleet morale modifier
 }
 
-// System threat calculation
+// System threat calculation (UPDATED)
 function calculateSystemThreat(system: StarSystem): number {
   const baseThreat = system.tier * 20;
   const typeModifier = {
@@ -469,6 +470,17 @@ function calculateSystemThreat(system: StarSystem): number {
   }[system.type];
   return baseThreat + typeModifier;
 }
+
+// Combat intel generation (NEW)
+function generateCombatIntel(fleetPower: number, systemThreat: number): CombatIntel {
+  const powerRatio = fleetPower / systemThreat;
+  return {
+    fleetPower: Math.floor(fleetPower),
+    estimatedEnemyThreat: Math.floor(systemThreat * (0.8 + Math.random() * 0.4)), // Intel uncertainty
+    powerRatio: Math.round(powerRatio * 100) / 100,
+    confidence: powerRatio > 1.5 ? 'HIGH' : powerRatio > 0.8 ? 'MEDIUM' : 'LOW'
+  };
+}
 ```
 
 ### Combat Resolution
@@ -478,11 +490,65 @@ function resolveCombat(fleetId: string, systemId: string): CombatOutcome {
   const systemThreat = calculateSystemThreat(system);
   const powerRatio = fleetPower / systemThreat;
   
+  // Generate combat intel for logging
+  const intel = generateCombatIntel(fleetPower, systemThreat);
+  
   // Determine outcome based on power ratio
-  if (powerRatio >= 2.0) return 'VICTORY';
-  if (powerRatio >= 1.2) return 'PYRRHIC_VICTORY';
-  if (powerRatio >= 0.8) return 'RETREAT';
-  return 'DESTRUCTION';
+  let outcome: CombatOutcomeType;
+  let damageMultiplier: number;
+  
+  if (powerRatio >= 2.0) {
+    outcome = 'VICTORY';
+    damageMultiplier = 0.1;
+  } else if (powerRatio >= 1.2) {
+    outcome = 'PYRRHIC_VICTORY';
+    damageMultiplier = 0.4;
+  } else if (powerRatio >= 0.8) {
+    outcome = 'RETREAT';
+    damageMultiplier = 0.6;
+  } else {
+    outcome = 'DESTRUCTION';
+    damageMultiplier = 1.0;
+  }
+  
+  // Apply damage based on outcome
+  applyCombatDamage(fleetId, damageMultiplier);
+  
+  return {
+    outcome,
+    intel,
+    damage: damageMultiplier,
+    loot: calculateLoot(system, outcome)
+  };
+}
+
+// Damage application (NEW)
+function applyCombatDamage(fleetId: string, multiplier: number): void {
+  const fleet = state.fleets[fleetId];
+  if (!fleet) return;
+  
+  // Apply integrity damage
+  const integrityDamage = Math.floor(50 * multiplier);
+  fleet.integrity = Math.max(0, fleet.integrity - integrityDamage);
+  
+  // Apply morale damage
+  const moraleDamage = Math.floor(30 * multiplier);
+  fleet.morale = Math.max(0, fleet.morale - moraleDamage);
+  
+  // Apply ship damage (individual ships can be destroyed)
+  for (const ship of fleet.ships) {
+    const shipDamage = Math.floor(40 * multiplier);
+    ship.integrity = Math.max(0, ship.integrity - shipDamage);
+    ship.morale = Math.max(0, ship.morale - Math.floor(20 * multiplier));
+  }
+  
+  // Remove destroyed ships
+  fleet.ships = fleet.ships.filter(ship => ship.integrity > 0);
+  
+  // Delete fleet if all ships destroyed
+  if (fleet.ships.length === 0) {
+    delete state.fleets[fleetId];
+  }
 }
 ```
 
@@ -513,7 +579,114 @@ function resolveCombat(fleetId: string, systemId: string): CombatOutcome {
 
 ---
 
-# 11. Scene Responsibilities
+# 17. UI Layout & Motion System (UPDATED)
+
+## 17.1 Lane-Based Text Layout
+
+### Implementation
+```ts
+// Lane-based positioning for hex text (UPDATED)
+interface HexLayout {
+  hexSize: number;
+  innerWidth: number;
+  topLane: number;    // y + hexSize * 0.0
+  centerLane: number; // y + hexSize * 0.0  
+  bottomLane: number; // y + hexSize * 0.38
+}
+
+function createHexLayout(hexSize: number): HexLayout {
+  return {
+    hexSize,
+    innerWidth: Math.floor(hexSize * 1.45),
+    topLane: 0,
+    centerLane: 0,
+    bottomLane: hexSize * 0.38
+  };
+}
+```
+
+### Text Rendering Rules
+- **Top Lane**: Reserved for future info (optional)
+- **Center Lane**: Fleet names (if present)
+- **Bottom Lane**: System names (always)
+- **Word Wrapping**: Text wraps at `innerWidth` to prevent overflow
+- **Origin**: All text uses `setOrigin(0.5, 0.5)` for centering
+- **Depth**: System names (50), Fleet names (60) for proper layering
+
+## 17.2 Motion & Animation System
+
+### Phase 1 Motion (Informational)
+```ts
+// Fleet movement animation (UPDATED)
+interface FleetMovement {
+  fleetId: string;
+  fromHex: HexCoord;
+  toHex: HexCoord;
+  duration: number; // 240-320ms
+  easing: string; // "Cubic.Out"
+}
+
+function animateFleetMovement(movement: FleetMovement): void {
+  const fleet = state.fleets[movement.fleetId];
+  const startPos = hexToPixel(movement.fromHex);
+  const endPos = hexToPixel(movement.toHex);
+  
+  // Create tween animation
+  this.tweens.add({
+    targets: fleet.renderObject,
+    x: endPos.x,
+    y: endPos.y,
+    duration: movement.duration,
+    ease: movement.easing,
+    onComplete: () => {
+      // Update game state after animation
+      fleet.location = movement.toHex;
+      refreshUI();
+    }
+  });
+}
+```
+
+### Phase 2 Motion (Event Feedback)
+```ts
+// Combat resolution feedback (NEW)
+interface CombatFeedback {
+  systemId: string;
+  outcome: CombatOutcomeType;
+  effects: CombatEffect[];
+}
+
+function showCombatFeedback(feedback: CombatFeedback): void {
+  const systemPos = getSystemPosition(feedback.systemId);
+  
+  // Screen shake for destruction
+  if (feedback.outcome === 'DESTRUCTION') {
+    this.cameras.main.shake(100, 0.02);
+  }
+  
+  // Flash effect for victory
+  if (feedback.outcome === 'VICTORY') {
+    const flash = this.add.rectangle(systemPos.x, systemPos.y, 100, 100, 0xffffff, 0.3);
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 300,
+      onComplete: () => flash.destroy()
+    });
+  }
+}
+```
+
+## 17.3 UI Rendering Performance
+
+### Optimization Strategy
+- **Static Elements**: Cache hex grid to render texture
+- **Dynamic Elements**: Update only changed system markers
+- **Text Optimization**: Pre-render static labels, update dynamic ones
+- **Spatial Hashing**: Fast system lookup for large galaxies
+- **Level of Detail**: Reduce detail at zoom levels < 0.5
+
+---
 
 ## 11.1 `GalaxyScene`
 
@@ -618,9 +791,236 @@ Goal: gameplay logic correctness without Phaser.
 
 ---
 
-# 15. Open Design/Tech Decisions
+# 16. Victory & Defeat Conditions (NEW)
 
-## 15.1 Fleet Composition Strategy
+## 16.1 Victory Conditions
+
+### Implementation
+```ts
+function checkVictoryConditions(state: GameState): VictoryResult | null {
+  const conditions = {
+    domination: checkDominationVictory(state),
+    economic: checkEconomicVictory(state),
+    exploration: checkExplorationVictory(state),
+    survival: checkSurvivalVictory(state)
+  };
+  
+  for (const [type, result] of Object.entries(conditions)) {
+    if (result.achieved) {
+      return {
+        type: type as VictoryType,
+        turn: state.turn,
+        score: calculateFinalScore(state, result.bonus)
+      };
+    }
+  }
+  
+  return null;
+}
+
+function checkDominationVictory(state: GameState): VictoryCheck {
+  const allSystems = Object.keys(state.galaxy);
+  const playerSystems = allSystems.filter(id => 
+    isSystemControlledByPlayer(state, id)
+  );
+  
+  return {
+    achieved: playerSystems.length === allSystems.length,
+    progress: playerSystems.length / allSystems.length,
+    bonus: playerSystems.length * 100
+  };
+}
+
+function checkEconomicVictory(state: GameState): VictoryCheck {
+  const t3Metals = state.resources.tieredMetals.T3;
+  return {
+    achieved: t3Metals >= 10000,
+    progress: t3Metals / 10000,
+    bonus: Math.floor(t3Metals / 100)
+  };
+}
+```
+
+## 16.2 Defeat Conditions
+
+### Implementation
+```ts
+function checkDefeatConditions(state: GameState): DefeatResult | null {
+  const conditions = {
+    annihilation: checkFleetAnnihilation(state),
+    resourceCollapse: checkResourceCollapse(state),
+    timeLimit: checkTimeLimit(state)
+  };
+  
+  for (const [type, result] of Object.entries(conditions)) {
+    if (result.triggered) {
+      return {
+        type: type as DefeatType,
+        turn: state.turn,
+        reason: result.reason
+      };
+    }
+  }
+  
+  return null;
+}
+
+function checkFleetAnnihilation(state: GameState): DefeatCheck {
+  const playerFleets = Object.values(state.fleets).filter(f => f.owner === 'PLAYER');
+  return {
+    triggered: playerFleets.length === 0,
+    reason: 'All player fleets destroyed'
+  };
+}
+```
+
+## 16.3 Scoring System
+
+### Score Calculation
+```ts
+function calculateFinalScore(state: GameState, victoryBonus: number): number {
+  let score = 0;
+  
+  // Base score from turn efficiency
+  score += Math.max(0, 10000 - state.turn * 10);
+  
+  // Resource bonus
+  score += state.resources.tieredMetals.T1 * 1;
+  score += state.resources.tieredMetals.T2 * 5;
+  score += state.resources.tieredMetals.T3 * 20;
+  
+  // Fleet survival bonus
+  const playerFleets = Object.values(state.fleets).filter(f => f.owner === 'PLAYER');
+  score += playerFleets.reduce((sum, fleet) => {
+    return sum + fleet.ships.length * 50;
+  }, 0);
+  
+  // Discovery bonus
+  const discoveredSystems = Object.values(state.galaxy).filter(s => s.discovered).length;
+  score += discoveredSystems * 100;
+  
+  // Victory condition bonus
+  score += victoryBonus;
+  
+  return score;
+}
+```
+
+---
+
+## 18. Platform Requirements & Accessibility (UPDATED)
+
+## 18.1 Performance Targets
+
+### Implementation
+```ts
+interface PerformanceMetrics {
+  loadTime: number;      // < 3000ms target
+  turnProcessing: number; // < 1000ms target
+  memoryUsage: number;    // < 100MB target
+  saveSize: number;      // < 1MB target
+}
+
+function measurePerformance(): PerformanceMetrics {
+  return {
+    loadTime: performance.now() - loadStartTime,
+    turnProcessing: lastTurnDuration,
+    memoryUsage: (performance as any).memory?.usedJSHeapSize || 0,
+    saveSize: JSON.stringify(state).length
+  };
+}
+```
+
+### Optimization Strategies
+- **Asset Loading**: Lazy load non-critical assets
+- **State Management**: Minimize unnecessary state updates
+- **Rendering**: Use object pooling for frequent creations
+- **Memory**: Clean up unused Phaser objects
+
+## 18.2 Accessibility Features
+
+### Implementation
+```ts
+interface AccessibilitySettings {
+  textScaling: number;     // 0.5 - 2.0
+  highContrast: boolean;   // Improved visibility
+  colorBlindMode: 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
+  keyboardOnly: boolean;    // Full keyboard navigation
+}
+
+function applyAccessibility(settings: AccessibilitySettings): void {
+  // Update text scaling
+  VisualStyle.font = `${Math.floor(16 * settings.textScaling)}px Consolas, Menlo, monospace`;
+  VisualStyle.smallFont = `${Math.floor(14 * settings.textScaling)}px Consolas, Menlo, monospace`;
+  
+  // Update color schemes
+  if (settings.highContrast) {
+    VisualStyle.uiText = '#FFFFFF';
+    VisualStyle.uiDim = '#CCCCCC';
+    VisualStyle.systemNode = 0xFFFFFF;
+  }
+  
+  // Update color blind friendly palettes
+  if (settings.colorBlindMode !== 'none') {
+    updateColorBlindPalette(settings.colorBlindMode);
+  }
+}
+```
+
+### Keyboard Navigation
+```ts
+// Full keyboard control implementation
+interface KeyboardControls {
+  navigate: 'Tab' | 'Shift+Tab';     // Cycle through elements
+  select: 'Enter' | 'Space';          // Activate selected element
+  back: 'Escape';                      // Close overlays
+  menu: 'M';                          // Open menu
+  help: 'F1';                         // Show help
+}
+
+function setupKeyboardNavigation(): void {
+  // Tab navigation through UI elements
+  this.input.keyboard.on('tab', () => navigateNextElement());
+  this.input.keyboard.on('shift-tab', () => navigatePreviousElement());
+  
+  // Enter/Space for activation
+  this.input.keyboard.on('enter', () => activateSelectedElement());
+  this.input.keyboard.on('space', () => activateSelectedElement());
+}
+```
+
+## 18.3 Cross-Platform Compatibility
+
+### Browser Support Matrix
+```ts
+interface BrowserSupport {
+  chrome: { min: '90', features: 'full' };
+  firefox: { min: '88', features: 'full' };
+  safari: { min: '14', features: 'full' };
+  edge: { min: '90', features: 'full' };
+}
+
+function checkBrowserCompatibility(): CompatibilityResult {
+  const userAgent = navigator.userAgent;
+  const browser = detectBrowser(userAgent);
+  const support = BrowserSupport[browser];
+  
+  return {
+    supported: compareVersions(browserVersion, support.min) >= 0,
+    browser,
+    version: browserVersion,
+    features: support.features
+  };
+}
+```
+
+### Mobile Considerations (Future)
+- **Touch Interface**: Convert mouse events to touch events
+- **Screen Size**: Responsive layout scaling
+- **Performance**: Optimize for mobile processors
+- **Controls**: On-screen button overlays for touch
+
+---
 
 **Decision**: Multi-ship fleets from Phase 1
 - `Fleet.ships: Ship[]` array (as in GDD)

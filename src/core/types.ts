@@ -201,6 +201,74 @@ export type IntelEntry = {
   text: string;
 };
 
+// Combat system types (NEW)
+export type CombatOutcomeType = 'VICTORY' | 'PYRRHIC_VICTORY' | 'RETREAT' | 'DESTRUCTION';
+
+export type CombatIntel = {
+  fleetPower: number;
+  estimatedEnemyThreat: number;
+  powerRatio: number;
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW';
+};
+
+export type CombatOutcome = {
+  outcome: CombatOutcomeType;
+  intel: CombatIntel;
+  damage: number; // Damage multiplier (0.1 - 1.0)
+  loot: Partial<TieredMetals>;
+};
+
+// Victory & Defeat system types (NEW)
+export type VictoryType = 'DOMINATION' | 'ECONOMIC' | 'EXPLORATION' | 'SURVIVAL';
+
+export type VictoryCheck = {
+  achieved: boolean;
+  progress: number; // 0.0 - 1.0
+  bonus: number;
+};
+
+export type VictoryResult = {
+  type: VictoryType;
+  turn: number;
+  score: number;
+};
+
+export type DefeatType = 'ANNIHILATION' | 'RESOURCE_COLLAPSE' | 'TIME_LIMIT';
+
+export type DefeatCheck = {
+  triggered: boolean;
+  reason: string;
+};
+
+export type DefeatResult = {
+  type: DefeatType;
+  turn: number;
+  reason: string;
+};
+
+// Performance and accessibility types (NEW)
+export type PerformanceMetrics = {
+  loadTime: number;      // < 3000ms target
+  turnProcessing: number; // < 1000ms target
+  memoryUsage: number;    // < 100MB target
+  saveSize: number;      // < 1MB target
+};
+
+export type AccessibilitySettings = {
+  textScaling: number;     // 0.5 - 2.0
+  highContrast: boolean;   // Improved visibility
+  colorBlindMode: 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
+  keyboardOnly: boolean;    // Full keyboard navigation
+};
+
+export type HexLayout = {
+  hexSize: number;
+  innerWidth: number;
+  topLane: number;    // y + hexSize * 0.0
+  centerLane: number; // y + hexSize * 0.0  
+  bottomLane: number; // y + hexSize * 0.38
+};
+
 export type GameState = {
   version: 1;
 

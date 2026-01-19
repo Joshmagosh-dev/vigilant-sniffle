@@ -32,7 +32,16 @@ import {
   Planet,
   HexCoord,
   SystemObjectType,
-  SystemObjectRef
+  SystemObjectRef,
+  CombatOutcomeType,
+  CombatIntel,
+  CombatOutcome,
+  VictoryType,
+  VictoryCheck,
+  VictoryResult,
+  DefeatType,
+  DefeatCheck,
+  DefeatResult
 } from './types';
 
 import { hexDistance } from '../utils/hex';
@@ -1560,4 +1569,308 @@ export function setFleetAnchor(fleetId: string, anchor: Fleet['systemAnchor']): 
 export function getFleetAnchor(fleetId: string): Fleet['systemAnchor'] {
   const fleet = state.fleets[fleetId];
   return fleet?.systemAnchor;
+}
+
+// -----------------------------------------------------------------------------
+// Combat Resolution System (NEW)
+// -----------------------------------------------------------------------------
+
+export function calculateFleetPower(fleet: Fleet): number {
+  let power = 0;
+  for (const ship of fleet.ships) {
+    const shipPower = 
+      (ship.weapons || 0) * 1.0 +
+      (ship.armor || 0) * 0.5 +
+      ship.integrity * 0.1 +
+      ship.morale * 0.05;
+    power += shipPower;
+  }
+  return power * (fleet.morale / 100); // Fleet morale modifier
+}
+
+export function calculateSystemThreat(system: StarSystem): number {
+  const baseThreat = system.tier * 20;
+  const typeModifier = {
+    'EMPTY_SPACE': 0,
+    'MINING_SYSTEM': 5,
+    'DERELICT': 15,
+    'HOSTILE_STRONGHOLD': 50,
+    'ABYSS_ZONE': 100,
+    'STAR': 0,
+    'NEBULA': 3,
+    'RUIN': 10,
+    'ANOMALY': 8
+  }[system.type];
+  return baseThreat + typeModifier;
+}
+
+export function generateCombatIntel(fleetPower: number, systemThreat: number): CombatIntel {
+  const powerRatio = fleetPower / systemThreat;
+  return {
+    fleetPower: Math.floor(fleetPower),
+    estimatedEnemyThreat: Math.floor(systemThreat * (0.8 + Math.random() * 0.4)), // Intel uncertainty
+    powerRatio: Math.round(powerRatio * 100) / 100,
+    confidence: powerRatio > 1.5 ? 'HIGH' : powerRatio > 0.8 ? 'MEDIUM' : 'LOW'
+  };
+}
+
+export function resolveCombat(fleetId: string, systemId: string): CombatOutcome {
+  const fleet = state.fleets[fleetId];
+  const system = state.galaxy[systemId];
+  
+  if (!fleet || !system) {
+    throw new Error(`Invalid combat: fleet ${fleetId} or system ${systemId} not found`);
+  }
+  
+  const fleetPower = calculateFleetPower(fleet);
+  const systemThreat = calculateSystemThreat(system);
+  const powerRatio = fleetPower / systemThreat;
+  
+  // Generate combat intel for logging
+  const intel = generateCombatIntel(fleetPower, systemThreat);
+  
+  // Determine outcome based on power ratio
+  let outcome: CombatOutcomeType;
+  let damageMultiplier: number;
+  
+  if (powerRatio >= 2.0) {
+    outcome = 'VICTORY';
+    damageMultiplier = 0.1;
+  } else if (powerRatio >= 1.2) {
+    outcome = 'PYRRHIC_VICTORY';
+    damageMultiplier = 0.4;
+  } else if (powerRatio >= 0.8) {
+    outcome = 'RETREAT';
+    damageMultiplier = 0.6;
+  } else {
+    outcome = 'DESTRUCTION';
+    damageMultiplier = 1.0;
+  }
+  
+  // Apply damage based on outcome
+  applyCombatDamage(fleetId, damageMultiplier);
+  
+  // Generate loot based on system tier and outcome
+  const loot = calculateLoot(system, outcome);
+  
+  // Log combat result
+  pushIntel('ALERT', `COMBAT: ${fleet.name} vs ${system.name} - ${outcome} (Power: ${intel.fleetPower} vs ${intel.estimatedEnemyThreat})`);
+  
+  return {
+    outcome,
+    intel,
+    damage: damageMultiplier,
+    loot
+  };
+}
+
+function applyCombatDamage(fleetId: string, multiplier: number): void {
+  const fleet = state.fleets[fleetId];
+  if (!fleet) return;
+  
+  // Apply integrity damage
+  const integrityDamage = Math.floor(50 * multiplier);
+  fleet.integrity = Math.max(0, fleet.integrity - integrityDamage);
+  
+  // Apply morale damage
+  const moraleDamage = Math.floor(30 * multiplier);
+  fleet.morale = Math.max(0, fleet.morale - moraleDamage);
+  
+  // Apply ship damage (individual ships can be destroyed)
+  for (const ship of fleet.ships) {
+    const shipDamage = Math.floor(40 * multiplier);
+    ship.integrity = Math.max(0, ship.integrity - shipDamage);
+    ship.morale = Math.max(0, ship.morale - Math.floor(20 * multiplier));
+  }
+  
+  // Remove destroyed ships
+  fleet.ships = fleet.ships.filter(ship => ship.integrity > 0);
+  
+  // Delete fleet if all ships destroyed
+  if (fleet.ships.length === 0) {
+    delete state.fleets[fleetId];
+    pushIntel('ALERT', `FLEET DESTROYED: ${fleet.name} was completely destroyed in combat`);
+  }
+}
+
+function calculateLoot(system: StarSystem, outcome: CombatOutcomeType): Partial<TieredMetals> {
+  if (outcome === 'DESTRUCTION') {
+    return {}; // No loot on destruction
+  }
+  
+  const baseLoot = {
+    T1: system.tier * 5,
+    T2: system.tier * 2,
+    T3: system.tier * 1
+  };
+  
+  // Reduce loot for retreat
+  if (outcome === 'RETREAT') {
+    return {
+      T1: Math.floor(baseLoot.T1 * 0.5),
+      T2: Math.floor(baseLoot.T2 * 0.5),
+      T3: Math.floor(baseLoot.T3 * 0.5)
+    };
+  }
+  
+  return baseLoot;
+}
+
+// -----------------------------------------------------------------------------
+// Victory & Defeat Conditions (NEW)
+// -----------------------------------------------------------------------------
+
+export function checkVictoryConditions(state: GameState): VictoryResult | null {
+  const conditions = {
+    domination: checkDominationVictory(state),
+    economic: checkEconomicVictory(state),
+    exploration: checkExplorationVictory(state),
+    survival: checkSurvivalVictory(state)
+  };
+  
+  for (const [type, result] of Object.entries(conditions)) {
+    if (result.achieved) {
+      return {
+        type: type as VictoryType,
+        turn: state.turn,
+        score: calculateFinalScore(state, result.bonus)
+      };
+    }
+  }
+  
+  return null;
+}
+
+function checkDominationVictory(state: GameState): VictoryCheck {
+  const allSystems = Object.keys(state.galaxy);
+  const playerSystems = allSystems.filter(id => 
+    isSystemControlledByPlayer(state, id)
+  );
+  
+  return {
+    achieved: playerSystems.length === allSystems.length,
+    progress: playerSystems.length / allSystems.length,
+    bonus: playerSystems.length * 100
+  };
+}
+
+function checkEconomicVictory(state: GameState): VictoryCheck {
+  const t3Metals = state.resources.tieredMetals.T3;
+  return {
+    achieved: t3Metals >= 10000,
+    progress: t3Metals / 10000,
+    bonus: Math.floor(t3Metals / 100)
+  };
+}
+
+function checkExplorationVictory(state: GameState): VictoryCheck {
+  const allSystems = Object.values(state.galaxy);
+  const discoveredSystems = allSystems.filter(s => s.discovered).length;
+  const totalSystems = allSystems.length;
+  
+  return {
+    achieved: discoveredSystems === totalSystems,
+    progress: discoveredSystems / totalSystems,
+    bonus: discoveredSystems * 50
+  };
+}
+
+function checkSurvivalVictory(state: GameState): VictoryCheck {
+  const playerFleets = Object.values(state.fleets).filter(f => f.owner === 'PLAYER');
+  return {
+    achieved: state.turn >= 100 && playerFleets.length > 0,
+    progress: Math.min(state.turn / 100, 1.0),
+    bonus: state.turn * 10
+  };
+}
+
+export function checkDefeatConditions(state: GameState): DefeatResult | null {
+  const conditions = {
+    annihilation: checkFleetAnnihilation(state),
+    resourceCollapse: checkResourceCollapse(state),
+    timeLimit: checkTimeLimit(state)
+  };
+  
+  for (const [type, result] of Object.entries(conditions)) {
+    if (result.triggered) {
+      return {
+        type: type as DefeatType,
+        turn: state.turn,
+        reason: result.reason
+      };
+    }
+  }
+  
+  return null;
+}
+
+function checkFleetAnnihilation(state: GameState): DefeatCheck {
+  const playerFleets = Object.values(state.fleets).filter(f => f.owner === 'PLAYER');
+  return {
+    triggered: playerFleets.length === 0,
+    reason: 'All player fleets destroyed'
+  };
+}
+
+function checkResourceCollapse(state: GameState): DefeatCheck {
+  const hasMiners = Object.values(state.fleets).some(f => 
+    f.owner === 'PLAYER' && f.role === 'MINER'
+  );
+  const hasResources = state.resources.tieredMetals.T1 > 0 || 
+                     state.resources.tieredMetals.T2 > 0 || 
+                     state.resources.tieredMetals.T3 > 0;
+  
+  return {
+    triggered: !hasMiners && !hasResources,
+    reason: 'No mining capability and no resources remaining'
+  };
+}
+
+function checkTimeLimit(state: GameState): DefeatCheck {
+  // Optional: could be configured per game mode
+  const turnLimit = 200; // Default limit
+  return {
+    triggered: state.turn > turnLimit,
+    reason: `Turn limit exceeded (${turnLimit} turns)`
+  };
+}
+
+function isSystemControlledByPlayer(state: GameState, systemId: string): boolean {
+  const system = state.galaxy[systemId];
+  if (!system) return false;
+  
+  // Check if player has station or fleet in system
+  const hasPlayerStation = system.station?.owner === 'PLAYER';
+  const hasPlayerFleet = Object.values(state.fleets).some(f => 
+    f.owner === 'PLAYER' && f.location === systemId
+  );
+  
+  return hasPlayerStation || hasPlayerFleet;
+}
+
+function calculateFinalScore(state: GameState, victoryBonus: number): number {
+  let score = 0;
+  
+  // Base score from turn efficiency
+  score += Math.max(0, 10000 - state.turn * 10);
+  
+  // Resource bonus
+  score += state.resources.tieredMetals.T1 * 1;
+  score += state.resources.tieredMetals.T2 * 5;
+  score += state.resources.tieredMetals.T3 * 20;
+  
+  // Fleet survival bonus
+  const playerFleets = Object.values(state.fleets).filter(f => f.owner === 'PLAYER');
+  score += playerFleets.reduce((sum, fleet) => {
+    return sum + fleet.ships.length * 50;
+  }, 0);
+  
+  // Discovery bonus
+  const discoveredSystems = Object.values(state.galaxy).filter(s => s.discovered).length;
+  score += discoveredSystems * 100;
+  
+  // Victory condition bonus
+  score += victoryBonus;
+  
+  return score;
 }

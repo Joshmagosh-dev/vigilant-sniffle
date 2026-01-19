@@ -322,6 +322,106 @@ ShipBuildCosts {
 - **Event Audio** - Distinct sounds for combat, discovery, alerts
 - **Minimal Approach** - Audio enhances, doesn't overwhelm
 
+
+
+## 14.5 Motion & Feedback (Phase 1)
+
+Motion in *HexFleet* is **informational**, not decorative.  
+All animation exists to confirm player intent, communicate state changes, and reinforce the passage of turns.
+
+### Core Principles
+- Motion never alters game state
+- Game state resolves instantly; visuals animate to match
+- Player input is temporarily locked during critical animations
+- Subtlety over spectacle; clarity over noise
+
+### Fleet Movement
+- Fleet movement is represented by a short positional tween between hex centers
+- Movement confirms:
+  - Which fleet moved
+  - From where to where
+  - That a turn cost was consumed
+- Duration: **240–320ms**
+- Easing: smooth out (`Cubic.Out` or equivalent)
+- Multiple fleet movements (enemy turns) resolve in controlled sequence
+
+### Idle Fleet Motion
+- Stationary fleets exhibit minimal idle motion
+- Slow, subtle positional drift (1–2px)
+- Represents active systems and living crews
+- Does not interfere with readability or selection
+
+### Turn Transition Feedback
+- Ending a turn triggers a brief visual transition
+- Fleet movements resolve visibly before player control resumes
+- Turn resolution reinforces that the galaxy has advanced
+
+### System State Motion
+- Systems communicate status through subtle motion cues:
+  - Scanned systems may softly pulse
+  - Hostile systems may flicker faintly
+  - Derelicts may exhibit intermittent static shimmer
+- Motion reinforces system state without requiring player interaction
+
+### Motion Scope Limits
+- No continuous camera drift
+- No real-time unit pathing
+- No decorative background animation in Phase 1
+- All motion is event-driven and state-dependent
+
+
+## 14.6 Motion & Feedback (Phase 2)
+
+Phase 2 motion expands on Phase 1 by introducing **event-driven impact feedback** and **environmental motion**, while maintaining HexFleet’s commitment to clarity, determinism, and restraint.
+
+All Phase 2 motion remains **non-interactive** and **state-reflective**.
+
+### Combat Resolution Feedback
+Combat remains abstract and non-tactical, but its outcome is reinforced through brief, high-impact motion cues.
+
+- Combat resolution triggers short, localized visual feedback at the system hex
+- Possible effects include:
+  - Brief screen shake or impact pulse
+  - Rapid flash or fracture effect on the system marker
+  - Fleet icon compression or disruption to indicate damage
+- Effects are:
+  - Short-lived (sub-second)
+  - Non-repeating
+  - Clearly tied to the combat result
+- Damage is visually represented as it is applied (integrity and morale changes resolve visibly)
+
+Combat motion reinforces **finality and consequence** without simulating battle.
+
+### Anomalies & Environmental Motion
+Certain systems exhibit subtle, continuous motion to indicate unusual or dangerous conditions.
+
+- Anomaly systems may display:
+  - Distortion pulses
+  - Irregular glow patterns
+  - Directional pull or inward drift
+- Abyss Zones may exhibit:
+  - Slow, heavy motion
+  - Darkening gradients or gravitational effects
+  - Persistent environmental animation to signal extreme risk
+
+Environmental motion serves as a **warning language**, not spectacle.
+
+### Discovery & Event Feedback
+Major discoveries and irreversible events are visually acknowledged.
+
+- First-time discovery of system types may trigger:
+  - Brief reveal pulse
+  - Scan-line or data-acquisition effect
+- Critical events (fleet destruction, artifact discovery) trigger:
+  - Short, unmistakable visual response
+  - Paired with clear intel log messaging
+
+### Phase 2 Motion Constraints
+- Motion remains subordinate to information clarity
+- No motion introduces ambiguity into system state
+- Effects never obscure icons, labels, or player input
+- Phase 2 motion builds upon Phase 1 foundations without altering core controls
+
 ---
 
 ## 15. Platform & Technical Requirements
